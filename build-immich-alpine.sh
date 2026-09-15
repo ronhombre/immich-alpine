@@ -129,6 +129,39 @@ cd $TMP
 git reset --hard $REV
 rm -rf .git
 
+# --- Patch machine-learning Python version constraint to allow 3.14 ---
+# Alpine 3.24's system Python is 3.14, and Alpine's py3-opencv and
+# py3-onnxruntime are compiled for 3.14. Immich pins Python 3.13; we
+# relax this so uv accepts the system interpreter.
+if [ -f machine-learning/pyproject.toml ]; then
+    sed -i -E \
+      -e 's/requires-python = ">=3\.12,<3\.14"/requires-python = ">=3.12,<3.15"/' \
+      -e 's/requires-python = ">=3\.13,<3\.14"/requires-python = ">=3.13,<3.15"/' \
+      -e 's/requires-python = "~=3\.13"/requires-python = ">=3.13,<3.15"/' \
+      machine-learning/pyproject.toml
+    echo "--- machine-learning requires-python after patch ---"
+    grep -n 'requires-python' machine-learning/pyproject.toml || true
+fi
+
+# uv may also read a .python-version file that pins 3.13.
+if [ -f machine-learning/.python-version ]; then
+    echo "Patching .python-version (3.13 -> 3.14)"
+    sed -i 's/^3\.13$/3.14/' machine-learning/.python-version
+    cat machine-learning/.python-version
+fi
+
+# uv's pyproject may also carry a [tool.uv] python-version pin.
+if grep -q 'python-version' machine-learning/pyproject.toml 2>/dev/null; then
+    sed -i -E 's/(python-version\s*=\s*")3\.13(")/\13.14\2/' machine-learning/pyproject.toml
+    echo "--- tool.uv python-version after patch ---"
+    grep -n 'python-version' machine-learning/pyproject.toml || true
+fi
+
+# Also check uv.toml if present.
+if [ -f machine-learning/uv.toml ]; then
+    sed -i -E 's/(python-version\s*=\s*")3\.13(")/\13.14\2/' machine-learning/uv.toml || true
+fi
+
 # Replace /usr/src with our install path
 if grep -Rql /usr/src . 2>/dev/null; then
     grep -Rl /usr/src . | xargs -n1 sed -i -e "s@/usr/src@$IMMICH_PATH@g"
@@ -207,6 +240,15 @@ python3 -m venv $APP/machine-learning/venv
     # This is required so that the Alpine py3-* native packages
     # (py3-opencv, py3-onnxruntime) are ABI-compatible with the venv.
     export UV_PYTHON_PREFERENCE=only-system
+
+    echo "=== uv sync diagnostics ==="
+    echo "System Python: $(python3 --version)"
+    echo "uv: $(uv --version)"
+    echo "requires-python in pyproject.toml:"
+    grep -n 'requires-python' pyproject.toml || true
+    echo ".python-version:"
+    cat .python-version 2>/dev/null || echo "(none)"
+    echo "=========================="
 
     # Native packages that lack musl wheels and have no sdist are
     # excluded here and provided by Alpine's apk packages instead.
