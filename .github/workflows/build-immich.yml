@@ -35,33 +35,26 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # Pin to the stable repository for core tools, but pull vips-dev from Edge.
           apk update
           apk add --no-cache \
-            bash \
-            sed \
-            curl \
-            gcompat \
-            libc6-compat \
-            nodejs npm pnpm \
-            python3 py3-pip \
-            uv \
+            bash sed curl gcompat libc6-compat \
+            nodejs npm pnpm python3 py3-pip uv \
             ffmpeg7 \
-            vips-dev libraw-dev \
             build-base \
-            git wget unzip jq \
-            util-linux \
-            perl \
-            perl-net-ssleay perl-io-socket-ssl \
+            git wget unzip jq util-linux \
+            perl perl-net-ssleay perl-io-socket-ssl \
             perl-capture-tiny perl-file-which perl-file-chdir \
             perl-extutils-pkgconfig perl-ffi-checklib \
             perl-test-warnings perl-test-fatal perl-test-needs \
             perl-test2-suite perl-sort-versions perl-path-tiny \
             perl-try-tiny perl-term-table \
             perl-mojolicious perl-file-slurper \
-            lcms2 \
-            mesa-gl \
-            file \
-            binutils
+            lcms2 mesa-gl file binutils
+
+          # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
+          apk add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
+            vips-dev libraw-dev
 
       - name: Create immich user and directories
         run: |
