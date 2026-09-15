@@ -39,6 +39,7 @@ jobs:
           apk add --no-cache \
             bash \
             sed \
+            curl \
             nodejs npm pnpm \
             python3 py3-pip \
             uv \
@@ -61,7 +62,7 @@ jobs:
       - name: Create immich user and directories
         run: |
           apk add --no-cache shadow
-          useradd -r -s /sbin/nologin -M immich
+          useradd -r -d /var/lib/immich/home -s /sbin/nologin -M immich
           mkdir -p /var/lib/immich/home
           mkdir -p /var/log/immich
           chown -R immich:immich /var/lib/immich /var/log/immich
@@ -70,7 +71,12 @@ jobs:
             echo "CRITICAL: Failed to create the 'immich' user."
             exit 1
           fi
-          echo "User 'immich' created successfully."
+          echo "User 'immich' created successfully (home: $(getent passwd immich | cut -d: -f6))"
+
+      - name: Verify HOME for immich user
+        run: |
+          su -s /bin/bash immich -c 'echo "HOME=$HOME"'
+          su -s /bin/bash immich -c 'echo "PWD=$(pwd)"'
 
       - name: Build Immich
         env:

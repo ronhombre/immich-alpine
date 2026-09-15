@@ -59,6 +59,26 @@ SHARP_FORCE_GLOBAL_LIBVIPS=true pnpm \
   --filter immich-web \
   install --frozen-lockfile --force
 
+# Install extism/js-pdk for extism-js
+curl -fsSL -o install-extism.sh https://raw.githubusercontent.com/extism/js-pdk/main/install.sh
+sed -i \
+  -e 's@sudo@@g' \
+  -e "s@/usr/local/binaryen@$HOME/binaryen@g" \
+  -e "s@/usr/local/bin@$HOME/.local/bin@g" \
+    install-extism.sh
+bash install-extism.sh
+rm install-extism.sh
+export PATH="$HOME/.local/bin:$PATH"
+
+# Verify extism-js is now on PATH
+if ! command -v extism-js >/dev/null 2>&1; then
+  echo "CRITICAL: extism-js not found after install"
+  echo "PATH=$PATH"
+  ls -la "$HOME/.local/bin" || true
+  exit 1
+fi
+echo "extism-js found at: $(command -v extism-js)"
+
 pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter immich build
 pnpm --filter @immich/sdk --filter immich-web build
 pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter @immich/plugin-core build
