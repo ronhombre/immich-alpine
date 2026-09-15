@@ -58,9 +58,9 @@ jobs:
 
       - name: Create immich user and directories
         run: |
-          adduser -S -h /var/lib/immich/home -s /sbin/nologin -D immich
           mkdir -p /var/lib/immich /var/log/immich
-          chown immich:immich /var/lib/immich /var/log/immich
+          adduser -S -h /var/lib/immich/home -s /sbin/nologin -D immich
+          chown -R immich:immich /var/lib/immich /var/log/immich
           chmod 700 /var/lib/immich
 
       - name: Build Immich
