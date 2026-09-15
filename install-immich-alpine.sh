@@ -3,8 +3,8 @@
 set -euo pipefail
 
 # --- Configuration ---
-RELEASE_TAG="${1:-}"          # e.g., v3.2.0
-GITHUB_REPO="${2:-ronhombre/immich-alpine}"   # e.g., arter97/immich-native
+RELEASE_TAG="${1:-}"
+GITHUB_REPO="${2:-ronhombre/immich-alpine}"
 ASSET_NAME="immich-alpine-3.24.tar.gz"
 IMMICH_PATH=/var/lib/immich
 
@@ -20,7 +20,11 @@ apk update
 apk add --no-cache \
     nodejs \
     ffmpeg7 \
-    vips libraw \
+    abseil-cpp abseil-cpp-flags-marshalling \
+    vips vips-cpp vips-jxl \
+    libraw \
+    python3 py3-opencv py3-onnxruntime \
+    py3-yaml py3-shapely \
     postgresql-client \
     util-linux \
     lcms2 \
@@ -89,10 +93,10 @@ EOF
 fi
 
 # --- Install OpenRC services (same as before) ---
-cat > /etc/init.d/immich-server <<'EOF'
+cat > /etc/init.d/immich <<'EOF'
 #!/sbin/openrc-run
 
-name="immich-server"
+name="immich"
 description="Immich Server"
 
 command="/var/lib/immich/app/start.sh"
@@ -100,8 +104,8 @@ command_user="immich"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
 
-output_log="/var/log/immich/immich-server.log"
-error_log="/var/log/immich/immich-server.err"
+output_log="/var/log/immich/immich.log"
+error_log="/var/log/immich/immich.err"
 
 depend() {
     need localmount
@@ -109,10 +113,10 @@ depend() {
 }
 EOF
 
-cat > /etc/init.d/immich-machine-learning <<'EOF'
+cat > /etc/init.d/immich-ml <<'EOF'
 #!/sbin/openrc-run
 
-name="immich-machine-learning"
+name="immich-ml"
 description="Immich Machine Learning"
 
 command="/var/lib/immich/app/machine-learning/start.sh"
@@ -129,13 +133,13 @@ depend() {
 }
 EOF
 
-chmod +x /etc/init.d/immich-server /etc/init.d/immich-machine-learning
-rc-update add immich-server default
-rc-update add immich-machine-learning default
+chmod +x /etc/init.d/immich /etc/init.d/immich-ml
+rc-update add immich default
+rc-update add immich-ml default
 
 echo
 echo "Installation complete."
 echo "Edit /var/lib/immich/env with your external PostgreSQL and Redis credentials."
 echo "Then start the services:"
-echo "  rc-service immich-machine-learning start"
-echo "  rc-service immich-server start"
+echo "  rc-service immich-ml start"
+echo "  rc-service immich start"
