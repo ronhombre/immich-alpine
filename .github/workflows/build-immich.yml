@@ -2,7 +2,7 @@ name: Build Immich for Alpine 3.24
 
 on:
   release:
-    types: [published]
+    types: [ published ]
   workflow_dispatch:
     inputs:
       immich_rev:
@@ -38,24 +38,25 @@ jobs:
           # Pin to the stable repository for core tools, but pull vips-dev from Edge.
           apk update
           apk add --no-cache \
-            bash sed curl gcompat libc6-compat \
-            nodejs npm pnpm python3 python3-dev py3-pip uv \
-            ffmpeg7 \
-            build-base \
-            git wget unzip jq util-linux \
-            perl perl-net-ssleay perl-io-socket-ssl \
-            perl-capture-tiny perl-file-which perl-file-chdir \
-            perl-extutils-pkgconfig perl-ffi-checklib \
-            perl-test-warnings perl-test-fatal perl-test-needs \
-            perl-test2-suite perl-sort-versions perl-path-tiny \
-            perl-try-tiny perl-term-table \
-            perl-mojolicious perl-file-slurper \
-            lcms2 mesa-gl file binutils \
-            py3-opencv py3-onnxruntime
-
-  # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
+          bash sed curl gcompat libc6-compat \
+          nodejs npm pnpm python3 python3-dev py3-pip uv \
+          ffmpeg7 \
+          build-base \
+          git wget unzip jq util-linux \
+          perl perl-net-ssleay perl-io-socket-ssl \
+          perl-capture-tiny perl-file-which perl-file-chdir \
+          perl-extutils-pkgconfig perl-ffi-checklib \
+          perl-test-warnings perl-test-fatal perl-test-needs \
+          perl-test2-suite perl-sort-versions perl-path-tiny \
+          perl-try-tiny perl-term-table \
+          perl-mojolicious perl-file-slurper \
+          lcms2 mesa-gl file binutils \
+          py3-opencv py3-onnxruntime \
+          py3-numpy-dev geos-dev
+          
+          # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
           apk add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
-            vips-dev libraw-dev
+          vips-dev libraw-dev
 
       - name: Create immich user and directories
         run: |
