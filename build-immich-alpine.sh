@@ -32,14 +32,55 @@ if [[ "$(id -un)" != "immich" ]]; then
     # Make the tree world-readable/executable
     chmod -R a+rX "$EXTISM_HOME"
 
-    # Symlink extism-js and binaryen tools into /usr/local/bin
+    # Symlink extism-js into /usr/local/bin (always on base PATH,
+    # regardless of pnpm's PATH sanitization).
     ln -sf "$EXTISM_HOME/.local/bin/extism-js" /usr/local/bin/extism-js
-    if [ -d "$EXTISM_HOME/binaryen/bin" ]; then
-        for tool in "$EXTISM_HOME"/binaryen/bin/*; do
-            [ -x "$tool" ] || continue
-            ln -sf "$tool" "/usr/local/bin/$(basename "$tool")"
-        done
+
+    # Discover and symlink every binaryen tool wherever it landed.
+    # The extism install script puts wasm-merge / wasm-opt in
+    # $HOME/.local/bin and/or $HOME/binaryen-version_N/bin; the layout
+    # is not stable across releases, so we search rather than guess.
+    find "$EXTISM_HOME" -maxdepth 4 -type f -name 'wasm-*' -perm -u+x \
+        2>/dev/null | while read -r tool; do
+        base=$(basename "$tool")
+        # Skip symlinks we may have created ourselves
+        [ -L "$tool" ] && continue
+        ln -sf "$tool" "/usr/local/bin/$base"
+        echo "linked $base -> $tool"
+    done
+
+    # Also walk any symlinks that point into the tarball extract dir
+    # (some versions symlink wasm-merge into .local/bin rather than copy).
+    find "$EXTISM_HOME" -maxdepth 4 -type l -name 'wasm-*' 2>/dev/null \
+        | while read -r link; do
+        base=$(basename "$link")
+        target=$(readlink -f "$link")
+        [ -x "$target" ] || continue
+        ln -sf "$target" "/usr/local/bin/$base"
+        echo "linked $base -> $target (via $link)"
+    done
+
+    # extism-js also honours BINARYEN_HOME; point it at whichever
+    # directory actually contains the tools.
+    BINARYEN_BIN_DIR=$(dirname "$(find "$EXTISM_HOME" -maxdepth 4 \
+        -name 'wasm-merge' -type f -perm -u+x 2>/dev/null | head -n1)")
+    if [ -n "$BINARYEN_BIN_DIR" ] && [ -d "$BINARYEN_BIN_DIR" ]; then
+        export BINARYEN_HOME="$(dirname "$BINARYEN_BIN_DIR")"
+        echo "BINARYEN_HOME resolved to $BINARYEN_HOME"
+    else
+        echo "WARNING: could not locate wasm-merge under $EXTISM_HOME"
     fi
+
+    # Verification — fail fast if binaryen tools are missing.
+    for tool in wasm-merge wasm-opt extism-js; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "CRITICAL: $tool is not on PATH after install"
+            echo "Contents of $EXTISM_HOME:"
+            find "$EXTISM_HOME" -maxdepth 3 -ls || true
+            exit 1
+        fi
+        echo "$tool -> $(command -v "$tool")"
+    done
 
     # Sanity check
     command -v extism-js || {
