@@ -35,9 +35,17 @@ git reset --hard $REV
 rm -rf .git
 
 # Replace /usr/src with our install path
-grep -Rl /usr/src | xargs -n1 sed -i -e "s@/usr/src@$IMMICH_PATH@g"
+if grep -Rql /usr/src . 2>/dev/null; then
+    grep -Rl /usr/src . | xargs -n1 sed -i -e "s@/usr/src@$IMMICH_PATH@g"
+fi
+
 mkdir -p $IMMICH_PATH/cache
-grep -RlE "\"/build\"|'/build'" | xargs -n1 sed -i -e "s@\"/build\"@\"$APP\"@g" -e "s@'/build'@'$APP'@g"
+
+# Replace /build with $APP
+if grep -RqlE "\"/build\"|'/build'" . 2>/dev/null; then
+    grep -RlE "\"/build\"|'/build'" . \
+      | xargs -n1 sed -i -e "s@\"/build\"@\"$APP\"@g" -e "s@'/build'@'$APP'@g"
+fi
 
 # --- Sharp / libvips ---
 # Alpine provides libvips 8.18.2, which satisfies sharp 0.34.x (>= 8.17.1).
