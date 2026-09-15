@@ -200,14 +200,16 @@ cd -
 mkdir -p $APP/machine-learning
 python3 -m venv $APP/machine-learning/venv
 (
-    # Initiate subshell to setup venv
     . $APP/machine-learning/venv/bin/activate
-    # Alpine provides uv as a system package; use it directly.
     cd machine-learning
 
-    # opencv-python-headless has no musl wheel. Use Alpine's
-    # system py3-opencv instead by excluding the pip package and
-    # installing the system package into the venv.
+    # Force uv to use Alpine's Python (not its own managed CPython).
+    # This is required so that the Alpine py3-* native packages
+    # (py3-opencv, py3-onnxruntime) are ABI-compatible with the venv.
+    export UV_PYTHON_PREFERENCE=only-system
+
+    # Native packages that lack musl wheels and have no sdist are
+    # excluded here and provided by Alpine's apk packages instead.
     uv sync \
         --frozen \
         --extra cpu \
@@ -216,16 +218,49 @@ python3 -m venv $APP/machine-learning/venv
         --no-install-project \
         --no-install-workspace \
         --no-install-package opencv-python-headless \
+        --no-install-package onnxruntime \
         --compile-bytecode \
         --no-progress \
         --no-cache \
         --active \
         --link-mode=copy
 
-    # Link the system OpenCV into the venv so immich_ml can import it.
-    SITE_PACKAGES=$(python -c 'import site; print(site.getsitepackages()[0])')
-    ln -sf /usr/lib/python3.14/site-packages/cv2 "$SITE_PACKAGES/cv2" 2>/dev/null || true
-    ln -sf /usr/lib/python3.14/site-packages/cv2*.so "$SITE_PACKAGES/" 2>/dev/null || true
+    # Locate the system site-packages that apk installed cv2/onnxruntime into.
+    SYS_SITE=""
+    for p in /usr/lib/python3.*/site-packages; do
+        if [ -d "$p" ]; then SYS_SITE="$p"; break; fi
+    done
+    VENV_SITE="$(python -c 'import site; print(site.getsitepackages()[0])')"
+    echo "SYS_SITE=$SYS_SITE"
+    echo "VENV_SITE=$VENV_SITE"
+
+    # Symlink the system native modules into the venv so immich_ml can import them.
+    for mod in cv2 onnxruntime; do
+        if [ -d "$SYS_SITE/$mod" ]; then
+            ln -sfn "$SYS_SITE/$mod" "$VENV_SITE/$mod"
+            echo "linked $mod (dir)"
+        fi
+        for so in "$SYS_SITE/${mod}"*.so "$SYS_SITE/${mod}"*.pyd; do
+            [ -e "$so" ] || continue
+            ln -sf "$so" "$VENV_SITE/$(basename "$so")"
+            echo "linked $(basename "$so")"
+        done
+    done
+
+    # Sanity check: both modules must import successfully.
+    python - <<'PY'
+import sys
+try:
+    import cv2
+    print("cv2 OK:", cv2.__version__)
+except Exception as e:
+    print("cv2 FAILED:", e); sys.exit(1)
+try:
+    import onnxruntime
+    print("onnxruntime OK:", onnxruntime.__version__)
+except Exception as e:
+    print("onnxruntime FAILED:", e); sys.exit(1)
+PY
 
     cd ..
 )
