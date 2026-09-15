@@ -68,16 +68,31 @@ sed -i \
     install-extism.sh
 bash install-extism.sh
 rm install-extism.sh
+
+# The install script places extism-js in $HOME/.local/bin and binaryen
+# tools in $HOME/binaryen/bin. pnpm's script runner uses a sanitized PATH
+# and will not find these. Symlink them into /usr/local/bin, which is
+# always part of the base PATH.
+ln -sf "$HOME/.local/bin/extism-js" /usr/local/bin/extism-js
+if [ -d "$HOME/binaryen/bin" ]; then
+  for tool in "$HOME"/binaryen/bin/*; do
+    [ -x "$tool" ] || continue
+    ln -sf "$tool" "/usr/local/bin/$(basename "$tool")"
+  done
+fi
+
+# Make sure extism-js can find binaryen regardless of how it resolves it
+export BINARYEN_HOME="$HOME/binaryen"
 export PATH="$HOME/.local/bin:$PATH"
 
-# Verify extism-js is now on PATH
+# Verify the install
+command -v extism-js
+extism-js --version || true
 if ! command -v extism-js >/dev/null 2>&1; then
   echo "CRITICAL: extism-js not found after install"
-  echo "PATH=$PATH"
-  ls -la "$HOME/.local/bin" || true
   exit 1
 fi
-echo "extism-js found at: $(command -v extism-js)"
+echo "extism-js ready: $(command -v extism-js)"
 
 pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter immich build
 pnpm --filter @immich/sdk --filter immich-web build
