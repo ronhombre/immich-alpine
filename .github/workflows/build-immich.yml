@@ -38,6 +38,7 @@ jobs:
           apk update
           apk add --no-cache \
             bash \
+            sed \
             nodejs npm pnpm \
             python3 py3-pip \
             uv \
