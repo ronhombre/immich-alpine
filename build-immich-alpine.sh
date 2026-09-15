@@ -169,8 +169,17 @@ pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter immich build
 pnpm --filter @immich/sdk --filter immich-web build
 pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter @immich/plugin-core build
 
+# Deploy production dependencies
 SHARP_FORCE_GLOBAL_LIBVIPS=true pnpm --filter immich --prod --no-optional deploy "$SERVER_PRUNED"
-SHARP_FORCE_GLOBAL_LIBVIPS=true pnpm \
+
+# Build Sharp from source, disabling LTO to avoid a conflict
+# between GCC's LTO and Alpine's fortify-headers package.
+# See: https://gitlab.alpinelinux.org/alpine/aports/-/issues/8626
+SHARP_FORCE_GLOBAL_LIBVIPS=true \
+CXXFLAGS="-fno-lto" \
+CFLAGS="-fno-lto" \
+LDFLAGS="-fno-lto" \
+pnpm \
   --config.verify-deps-before-run=false \
   --dir "$SERVER_PRUNED/node_modules/sharp" \
   exec npm run build
