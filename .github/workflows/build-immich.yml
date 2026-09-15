@@ -53,7 +53,7 @@ jobs:
           lcms2 mesa-gl file binutils \
           py3-opencv py3-onnxruntime \
           py3-numpy-dev geos-dev py3-shapely \
-          protobuf-dev py3-nanobind
+          protobuf-dev py3-nanobind py3-yaml
           
           # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
           apk add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \

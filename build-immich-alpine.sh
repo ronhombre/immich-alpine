@@ -260,7 +260,10 @@ python3 -m venv $APP/machine-learning/venv
         --no-install-project \
         --no-install-workspace \
         --no-install-package opencv-python-headless \
+        --no-install-package opencv-python \
         --no-install-package onnxruntime \
+        --no-install-package shapely \
+        --no-install-package pyyaml \
         --compile-bytecode \
         --no-progress \
         --no-cache \
@@ -277,7 +280,7 @@ python3 -m venv $APP/machine-learning/venv
     echo "VENV_SITE=$VENV_SITE"
 
     # Symlink the system native modules into the venv so immich_ml can import them.
-    for mod in cv2 onnxruntime; do
+    for mod in cv2 onnxruntime shapely yaml; do
         if [ -d "$SYS_SITE/$mod" ]; then
             ln -sfn "$SYS_SITE/$mod" "$VENV_SITE/$mod"
             echo "linked $mod (dir)"
