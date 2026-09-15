@@ -50,7 +50,8 @@ jobs:
             perl-test2-suite perl-sort-versions perl-path-tiny \
             perl-try-tiny perl-term-table \
             perl-mojolicious perl-file-slurper \
-            lcms2 mesa-gl file binutils
+            lcms2 mesa-gl file binutils \
+            py3-opencv
 
           # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
           apk add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \

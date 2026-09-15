@@ -200,9 +200,14 @@ cd -
 mkdir -p $APP/machine-learning
 python3 -m venv $APP/machine-learning/venv
 (
+    # Initiate subshell to setup venv
     . $APP/machine-learning/venv/bin/activate
     # Alpine provides uv as a system package; use it directly.
     cd machine-learning
+
+    # opencv-python-headless has no musl wheel. Use Alpine's
+    # system py3-opencv instead by excluding the pip package and
+    # installing the system package into the venv.
     uv sync \
         --frozen \
         --extra cpu \
@@ -210,11 +215,18 @@ python3 -m venv $APP/machine-learning/venv
         --no-editable \
         --no-install-project \
         --no-install-workspace \
+        --no-install-package opencv-python-headless \
         --compile-bytecode \
         --no-progress \
         --no-cache \
         --active \
         --link-mode=copy
+
+    # Link the system OpenCV into the venv so immich_ml can import it.
+    SITE_PACKAGES=$(python -c 'import site; print(site.getsitepackages()[0])')
+    ln -sf /usr/lib/python3.14/site-packages/cv2 "$SITE_PACKAGES/cv2" 2>/dev/null || true
+    ln -sf /usr/lib/python3.14/site-packages/cv2*.so "$SITE_PACKAGES/" 2>/dev/null || true
+
     cd ..
 )
 cp -a machine-learning/immich_ml $APP/machine-learning/
