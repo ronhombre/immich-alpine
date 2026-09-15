@@ -1,0 +1,95 @@
+name: Build Immich for Alpine 3.24
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      immich_rev:
+        description: 'Immich Version (tag, branch, or commit)'
+        required: true
+        default: 'v3.2.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    container:
+      image: alpine:3.24
+      options: --user root
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Immich revision
+        id: rev
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "immich_rev=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "immich_rev=${{ github.event.inputs.immich_rev }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build dependencies
+        run: |
+          apk update
+          apk add --no-cache \
+            nodejs npm pnpm \
+            python3 py3-pip \
+            uv \
+            ffmpeg7 \
+            vips-dev libraw-dev \
+            build-base \
+            git wget unzip jq \
+            util-linux \
+            perl \
+            perl-net-ssleay perl-io-socket-ssl \
+            perl-capture-tiny perl-file-which perl-file-chdir \
+            perl-pkgconfig perl-ffi-checklib \
+            perl-test-warnings perl-test-fatal perl-test-needs \
+            perl-test2-suite perl-sort-versions perl-path-tiny \
+            perl-try-tiny perl-term-table perl-any-uri-escape \
+            perl-mojolicious perl-file-slurper \
+            lcms2 \
+            libgl
+
+      - name: Create immich user and directories
+        run: |
+          adduser -S -h /var/lib/immich/home -s /sbin/nologin -D immich
+          mkdir -p /var/lib/immich /var/log/immich
+          chown immich:immich /var/lib/immich /var/log/immich
+          chmod 700 /var/lib/immich
+
+      - name: Build Immich
+        env:
+          IMMICH_REV: ${{ steps.rev.outputs.immich_rev }}
+        run: |
+          chmod +x build-immich-alpine.sh
+          ./build-immich-alpine.sh
+
+      - name: Package artifact
+        run: |
+          cd /
+          tar -czf /tmp/immich-alpine-3.24.tar.gz \
+            var/lib/immich \
+            var/log/immich
+
+      - name: Upload artifact to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: /tmp/immich-alpine-3.24.tar.gz
+          tag_name: ${{ github.event.release.tag_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact as workflow artifact (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: immich-alpine-3.24
+          path: /tmp/immich-alpine-3.24.tar.gz
+          retention-days: 30
