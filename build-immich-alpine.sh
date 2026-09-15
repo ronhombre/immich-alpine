@@ -85,6 +85,17 @@ if grep -RqlE "\"/build\"|'/build'" . 2>/dev/null; then
       | xargs -n1 sed -i -e "s@\"/build\"@\"$APP\"@g" -e "s@'/build'@'$APP'@g"
 fi
 
+# Patch plugin-core's build:wasm script to use an absolute path.
+# pnpm sanitizes PATH for lifecycle scripts on Alpine, so PATH-based
+# lookup of extism-js does not work even when /usr/local/bin is on PATH.
+if [ -f packages/plugin-core/package.json ]; then
+  sed -i \
+    -e 's@"extism-js dist/@"/usr/local/bin/extism-js dist/@g' \
+    packages/plugin-core/package.json
+  echo "--- plugin-core script section after patch ---"
+  grep -n "extism-js" packages/plugin-core/package.json || true
+fi
+
 # --- Sharp / libvips ---
 # Alpine provides libvips 8.18.2, which satisfies sharp 0.34.x (>= 8.17.1).
 SHARP_USE_GLOBAL_LIBVIPS=true
