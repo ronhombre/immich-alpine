@@ -24,15 +24,19 @@ apk add --no-cache \
     postgresql-client \
     util-linux \
     lcms2 \
-    libgl \
+    mesa-gl \
+    geos \
     bash \
     curl
 
 # --- Create immich user and directories ---
+mkdir -p /var/lib/immich /var/log/immich
+if ! getent group immich >/dev/null 2>&1; then
+    addgroup -S immich
+fi
 if ! id immich &>/dev/null; then
     adduser -S -h /var/lib/immich/home -s /sbin/nologin -D immich
 fi
-mkdir -p /var/lib/immich /var/log/immich
 chown immich:immich /var/lib/immich /var/log/immich
 chmod 700 /var/lib/immich
 
