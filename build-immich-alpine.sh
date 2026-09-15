@@ -260,7 +260,10 @@ python3 -m venv $APP/machine-learning/venv
         --no-install-project \
         --no-install-workspace \
         --no-install-package opencv-python-headless \
+        --no-install-package opencv-python \
         --no-install-package onnxruntime \
+        --no-install-package shapely \
+        --no-install-package pyyaml \
         --compile-bytecode \
         --no-progress \
         --no-cache \

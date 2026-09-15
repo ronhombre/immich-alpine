@@ -51,9 +51,10 @@ jobs:
             perl-try-tiny perl-term-table \
             perl-mojolicious perl-file-slurper \
             lcms2 mesa-gl file binutils \
-            py3-opencv py3-onnxruntime
+            py3-opencv py3-onnxruntime \
+            py3-numpy-dev geos-dev
 
-          # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
+  # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
           apk add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
             vips-dev libraw-dev
 
