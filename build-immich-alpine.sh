@@ -10,9 +10,47 @@ APP=$IMMICH_PATH/app
 export NODE_OPTIONS="--max-old-space-size=4096"
 
 if [[ "$(id -un)" != "immich" ]]; then
-    # Fork as immich user
+    # -----------------------------------------------------------------
+    # Install extism-js and binaryen as root, into a system-wide location.
+    # Doing this before we fork into the immich user avoids the
+    # "Permission denied" error when symlinking into /usr/local/bin.
+    # pnpm-spawned shells always see /usr/local/bin regardless of HOME.
+    # -----------------------------------------------------------------
+    EXTISM_HOME=/opt/immich-extism
+    mkdir -p "$EXTISM_HOME/.local/bin" "$EXTISM_HOME/binaryen"
+
+    curl -fsSL -o /tmp/install-extism.sh \
+        https://raw.githubusercontent.com/extism/js-pdk/main/install.sh
+    sed -i \
+      -e 's@sudo@@g' \
+      -e "s@/usr/local/binaryen@$EXTISM_HOME/binaryen@g" \
+      -e "s@/usr/local/bin@$EXTISM_HOME/.local/bin@g" \
+        /tmp/install-extism.sh
+    HOME="$EXTISM_HOME" bash /tmp/install-extism.sh
+    rm -f /tmp/install-extism.sh
+
+    # Make the tree world-readable/executable
+    chmod -R a+rX "$EXTISM_HOME"
+
+    # Symlink extism-js and binaryen tools into /usr/local/bin
+    ln -sf "$EXTISM_HOME/.local/bin/extism-js" /usr/local/bin/extism-js
+    if [ -d "$EXTISM_HOME/binaryen/bin" ]; then
+        for tool in "$EXTISM_HOME"/binaryen/bin/*; do
+            [ -x "$tool" ] || continue
+            ln -sf "$tool" "/usr/local/bin/$(basename "$tool")"
+        done
+    fi
+
+    # Sanity check
+    command -v extism-js || {
+        echo "CRITICAL: extism-js not found after install"
+        exit 1
+    }
+    echo "extism-js ready at $(command -v extism-js)"
+
     echo "Forking the script as user immich"
-    exec su -s /bin/bash immich -c "IMMICH_REV=$REV $0"
+    exec su -s /bin/bash immich -c \
+        "IMMICH_REV=$REV BINARYEN_HOME=$EXTISM_HOME/binaryen $0"
 fi
 
 umask 077
@@ -58,41 +96,6 @@ SHARP_FORCE_GLOBAL_LIBVIPS=true pnpm \
   --filter immich \
   --filter immich-web \
   install --frozen-lockfile --force
-
-# Install extism/js-pdk for extism-js
-curl -fsSL -o install-extism.sh https://raw.githubusercontent.com/extism/js-pdk/main/install.sh
-sed -i \
-  -e 's@sudo@@g' \
-  -e "s@/usr/local/binaryen@$HOME/binaryen@g" \
-  -e "s@/usr/local/bin@$HOME/.local/bin@g" \
-    install-extism.sh
-bash install-extism.sh
-rm install-extism.sh
-
-# The install script places extism-js in $HOME/.local/bin and binaryen
-# tools in $HOME/binaryen/bin. pnpm's script runner uses a sanitized PATH
-# and will not find these. Symlink them into /usr/local/bin, which is
-# always part of the base PATH.
-ln -sf "$HOME/.local/bin/extism-js" /usr/local/bin/extism-js
-if [ -d "$HOME/binaryen/bin" ]; then
-  for tool in "$HOME"/binaryen/bin/*; do
-    [ -x "$tool" ] || continue
-    ln -sf "$tool" "/usr/local/bin/$(basename "$tool")"
-  done
-fi
-
-# Make sure extism-js can find binaryen regardless of how it resolves it
-export BINARYEN_HOME="$HOME/binaryen"
-export PATH="$HOME/.local/bin:$PATH"
-
-# Verify the install
-command -v extism-js
-extism-js --version || true
-if ! command -v extism-js >/dev/null 2>&1; then
-  echo "CRITICAL: extism-js not found after install"
-  exit 1
-fi
-echo "extism-js ready: $(command -v extism-js)"
 
 pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter immich build
 pnpm --filter @immich/sdk --filter immich-web build
