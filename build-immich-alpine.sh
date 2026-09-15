@@ -260,10 +260,7 @@ python3 -m venv $APP/machine-learning/venv
         --no-install-project \
         --no-install-workspace \
         --no-install-package opencv-python-headless \
-        --no-install-package opencv-python \
         --no-install-package onnxruntime \
-        --no-install-package shapely \
-        --no-install-package pyyaml \
         --compile-bytecode \
         --no-progress \
         --no-cache \
@@ -321,7 +318,7 @@ wget -q -O cities500.zip https://download.geonames.org/export/dump/cities500.zip
 wget -q -O ne_10m_admin_0_countries.geojson https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_admin_0_countries.geojson &
 wait
 unzip -q cities500.zip
-date --iso-8601=seconds | tr -d "\n" > geodata-date.txt
+date -Iseconds | tr -d "\n" > geodata-date.txt
 rm cities500.zip
 cd -
 
