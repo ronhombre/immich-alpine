@@ -40,6 +40,8 @@ jobs:
             bash \
             sed \
             curl \
+            gcompat \
+            libc6-compat \
             nodejs npm pnpm \
             python3 py3-pip \
             uv \
@@ -57,7 +59,9 @@ jobs:
             perl-try-tiny perl-term-table \
             perl-mojolicious perl-file-slurper \
             lcms2 \
-            mesa-gl
+            mesa-gl \
+            file \
+            binutils
 
       - name: Create immich user and directories
         run: |

@@ -53,6 +53,17 @@ if [[ "$(id -un)" != "immich" ]]; then
     chmod a+rx /opt /opt/immich-extism /opt/immich-extism/.local /opt/immich-extism/.local/bin
     chmod a+rx /usr/local/bin
 
+    # ---- extism-js / binaryen diagnostics ----
+    echo "=== extism-js diagnostics ==="
+    file /opt/immich-extism/.local/bin/extism-js || true
+    readelf -l /opt/immich-extism/.local/bin/extism-js 2>/dev/null \
+        | grep -i 'interpreter' || true
+    ldd /opt/immich-extism/.local/bin/extism-js 2>&1 | head -20 || true
+    echo "=== glibc loader probe ==="
+    ls -la /lib64/ld-linux-x86-64.so.2 2>&1 || true
+    ls -la /lib/ld-linux-x86-64.so.2   2>&1 || true
+    echo "=== end diagnostics ==="
+
     echo "Forking the script as user immich"
     exec su -s /bin/bash immich -c \
         "IMMICH_REV=$REV BINARYEN_HOME=$EXTISM_HOME/binaryen $0"
