@@ -58,10 +58,17 @@ jobs:
 
       - name: Create immich user and directories
         run: |
-          mkdir -p /var/lib/immich /var/log/immich /var/lib/immich/home
-          adduser -S -D -H -s /sbin/nologin immich
-          chown -R immich:immich /var/lib/immich /var/log/immich /var/lib/immich/home
+          apk add --no-cache shadow
+          useradd -r -s /sbin/nologin -M immich
+          mkdir -p /var/lib/immich/home
+          mkdir -p /var/log/immich
+          chown -R immich:immich /var/lib/immich /var/log/immich
           chmod 700 /var/lib/immich
+          if ! id immich &>/dev/null; then
+            echo "CRITICAL: Failed to create the 'immich' user."
+            exit 1
+          fi
+          echo "User 'immich' created successfully."
 
       - name: Build Immich
         env:
