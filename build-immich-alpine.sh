@@ -48,6 +48,11 @@ if [[ "$(id -un)" != "immich" ]]; then
     }
     echo "extism-js ready at $(command -v extism-js)"
 
+    chmod +x /opt/immich-extism/.local/bin/extism-js
+    # Make sure the symlink target and the intermediate directory are traversable
+    chmod a+rx /opt /opt/immich-extism /opt/immich-extism/.local /opt/immich-extism/.local/bin
+    chmod a+rx /usr/local/bin
+
     echo "Forking the script as user immich"
     exec su -s /bin/bash immich -c \
         "IMMICH_REV=$REV BINARYEN_HOME=$EXTISM_HOME/binaryen $0"
