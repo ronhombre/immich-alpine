@@ -8,8 +8,11 @@ supported. Though, you are welcome to try them out, but it won't be as simple as
 > I have validated that this works, but I have not tested it extensively. I do not make any guarantees. Please test and
 > let me know if you find any issues, or not. (tell me it works fine please!)
 
-**I HAVE ALSO NOT TESTED THE UPGRADE PATH WITH THE INSTALL SCRIPT. I WILL DO SO WHEN I HAVE THE TIME AFTER THE NEXT
-IMMICH RELEASE IS OUT.**
+> [!NOTE]
+> I have tested the upgrade path. Simply re-run the install script and it will upgrade the server. You may need to
+> extend the file system since the new files basically double the storage size used. (P.S. I had to increase mine from
+> 2.25GB to 8GB. This should be fine for most people since most hypervisors only use storage that's actually used by
+> the VMs and the CTs.)
 
 ## Installation
 
@@ -20,7 +23,7 @@ wget -O install-immich-alpine.sh \
 chmod +x install-immich-alpine.sh
 
 # Install a specific release (starting from v3.2.0)
-./install-immich-alpine.sh v3.2.0 ronhombre/immich-alpine
+./install-immich-alpine.sh v3.2.2 ronhombre/immich-alpine
 ```
 
 ## Example (Working)
@@ -34,6 +37,11 @@ This uses a mounted 72GB volume for the files, and another VM for Postgres and R
 
 Looking at this, it might be a good idea to separate the machine-learning app from the main server, but that is a
 project for a future me.
+
+## Example (Upgrade path)
+![upgrade-verified.png](upgrade-verified.png)
+
+I have successfully upgraded from v3.2.0 to v3.2.2.
 
 ### Issues I encountered
 - I also mounted the ML cache as a 2GB volume. Remember to set `chown immich:immich /var/lib/immich/cache` because I
