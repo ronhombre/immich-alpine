@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-immich-alpine.sh
+# TODO: Simplify and remove some redundant lines
 set -xeuo pipefail
 
 REV="${IMMICH_REV:-v3.2.0}"
