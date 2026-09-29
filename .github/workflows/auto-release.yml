@@ -35,3 +35,11 @@ jobs:
             --notes "**Full Changelog**: https://github.com/ronhombre/immich-alpine/compare/${PREV_TAG}...${VERSION}
 
           Please see https://github.com/immich-app/immich/releases/tag/${VERSION}"
+
+      - name: Trigger build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          gh workflow run "build-immich.yml" \
+            -f immich_rev="${VERSION}"
