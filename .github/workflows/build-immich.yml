@@ -9,6 +9,10 @@ on:
         description: 'Immich Version (tag, branch, or commit)'
         required: true
         default: 'v3.2.0'
+      release_tag:
+        description: 'Release tag to attach the artifact to (optional)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -29,8 +33,10 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "release" ]]; then
             echo "immich_rev=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            echo "release_tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
           else
             echo "immich_rev=${{ github.event.inputs.immich_rev }}" >> "$GITHUB_OUTPUT"
+            echo "release_tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install build dependencies
@@ -93,16 +99,16 @@ jobs:
             var/log/immich
 
       - name: Upload artifact to GitHub Release
-        if: github.event_name == 'release'
+        if: steps.rev.outputs.release_tag != ''
         uses: softprops/action-gh-release@v3
         with:
           files: /tmp/immich-alpine-3.24.tar.gz
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ steps.rev.outputs.release_tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload artifact as workflow artifact (manual runs)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload artifact as workflow artifact (manual runs without a release)
+        if: steps.rev.outputs.release_tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: immich-alpine-3.24
