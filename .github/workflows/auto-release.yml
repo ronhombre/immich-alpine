@@ -42,4 +42,5 @@ jobs:
           VERSION: ${{ github.event.client_payload.version }}
         run: |
           gh workflow run "build-immich.yml" \
-            -f immich_rev="${VERSION}"
+            -f immich_rev="${VERSION}" \
+            -f release_tag="${VERSION}"
