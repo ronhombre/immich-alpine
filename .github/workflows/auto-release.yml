@@ -1,0 +1,37 @@
+# This is triggered by a Cloudflare Worker when a new Immich version is released
+name: Auto Release
+
+on:
+  repository_dispatch:
+    types: [update-received]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # Fetch full history + tags so we can determine the previous release tag
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine previous tag
+        id: prev
+        run: |
+          # Latest existing tag (semver-sorted, descending) → previous release
+          PREV_TAG=$(git tag --sort=-v:refname | head -n1)
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.client_payload.version }}
+          PREV_TAG: ${{ steps.prev.outputs.prev_tag }}
+        run: |
+          gh release create "${VERSION}" \
+            --title "${VERSION}" \
+            --notes "**Full Changelog**: https://github.com/ronhombre/immich-alpine/compare/${PREV_TAG}...${VERSION}
+
+          Please see https://github.com/immich-app/immich/releases/tag/${VERSION}"
