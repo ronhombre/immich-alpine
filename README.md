@@ -23,7 +23,7 @@ wget -O install-immich-alpine.sh \
 chmod +x install-immich-alpine.sh
 
 # Install a specific release (starting from v3.2.0)
-./install-immich-alpine.sh v3.2.2 ronhombre/immich-alpine
+./install-immich-alpine.sh v3.2.4 ronhombre/immich-alpine
 ```
 
 ## Example (Working)
