@@ -122,7 +122,7 @@ fi
 
 # Prevent two installers from replacing the same application at once.
 exec 9> /run/immich-alpine-install.lock
-flock -n 9 || { echo 'ERROR: Another Immich installer is running.' >&2; exit 1; }
+flock -n 9 || { echo 'ERROR: Another Immich installer is already running.' >&2; exit 1; }
 
 mkdir -p "$IMMICH_PATH" "$IMMICH_LOG_PATH" "$BACKUP_ROOT"
 chmod 700 "$BACKUP_ROOT"
@@ -306,10 +306,10 @@ NODE_OPTIONS="--max-old-space-size=512"
 ENV
     chown immich:immich "$IMMICH_PATH/env"
     chmod 600 "$IMMICH_PATH/env"
-    echo "Created $IMMICH_PATH/env; edit DB/Redis credentials before starting."
+    echo "Created \"$IMMICH_PATH/env\". Please edit DB/Redis credentials before starting."
 fi
 
-# --- Install OpenRC scripts atomically. Quoted heredocs preserve OpenRC vars. ---
+# --- Install OpenRC scripts atomically ---
 cat > "/etc/init.d/.immich.new.$$" <<'OPENRC'
 #!/sbin/openrc-run
 name="immich"
@@ -365,7 +365,7 @@ if (( IS_UPGRADE )); then
         fi
         sleep 2
     done
-    (( healthy )) || { echo 'ERROR: Health check failed. Backup and pending state preserved.' >&2; exit 1; }
+    (( healthy )) || { echo 'ERROR: Health check failed. Backup and pending state preserved. Please try again.' >&2; exit 1; }
 
     # Commit the new version ONLY after verifying the upgraded services.
     printf '%s\n' "$RELEASE_TAG" > "$VERSION_FILE.tmp.$$"
