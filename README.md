@@ -61,6 +61,11 @@ sessions. I had to open up my database VM's firewall just for that. (P.S. I have
 - `build-immich-alpine.sh` builds immich from source in an Alpine Linux container.
 - `install-immich-alpine.sh` is an install script that downloads the artifacts from the release and sets it up locally.
 
+## FAQ
+- **Q:** My install/upgrade failed and I want to restore.
+
+**A:** The backups are typically stored at `/var/lib/immich/backups`. You can manually move them back to `/var/lib/immich/app` or symlink if you're lazy.
+
 ## References
 - Heavily inspired by [arter97/immich-native](https://github.com/arter97/immich-native). I made this because I wanted to
 run Immich on Alpine Linux and reduce the memory footprint. I also hated having to build the server myself every time.
