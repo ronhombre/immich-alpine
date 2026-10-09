@@ -2,8 +2,9 @@
 set -Eeuo pipefail
 umask 077
 
-# Usage: install-immich-alpine-improved.sh <release-tag> [owner/repo]
-RELEASE_TAG="${1:-}"
+# Usage: install-immich-alpine.sh [release-tag|latest] [owner/repo]
+# No release argument means the latest published stable GitHub release.
+RELEASE_TAG="${1:-latest}"
 GITHUB_REPO="${2:-ronhombre/immich-alpine}"
 ASSET_NAME="immich-alpine-3.24.tar.gz"
 IMMICH_PATH="/var/lib/immich"
@@ -14,8 +15,13 @@ PENDING_FILE="$IMMICH_PATH/.upgrade-pending"
 HEALTH_URL="${IMMICH_HEALTH_URL:-http://127.0.0.1:2283/api/server/ping}"
 HEALTH_RETRIES="${IMMICH_HEALTH_RETRIES:-30}"
 
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    printf 'Usage: %s [release-tag|latest] [owner/repo]\n' "$0"
+    printf 'Without arguments, installs the latest stable ronhombre/immich-alpine release.\n'
+    exit 0
+fi
+(( $# <= 2 )) || { echo "Usage: $0 [release-tag|latest] [owner/repo]" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || { echo 'ERROR: Run as root.' >&2; exit 1; }
-[[ -n "$RELEASE_TAG" ]] || { echo "Usage: $0 <release-tag> [owner/repo]" >&2; exit 1; }
 [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || { echo 'ERROR: Unsafe release tag.' >&2; exit 1; }
 [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'ERROR: Expected owner/repo.' >&2; exit 1; }
 [[ "$HEALTH_RETRIES" =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: HEALTH_RETRIES must be positive.' >&2; exit 1; }
@@ -91,9 +97,32 @@ apk add --no-cache \
     python3 py3-opencv py3-onnxruntime py3-yaml py3-shapely \
     postgresql-client util-linux lcms2 mesa-gl geos bash curl
 
+# Resolve latest via GitHub's stable-release redirect, not the rate-limited API.
+# Resolve before touching services; a lookup failure leaves Immich running.
+if [[ "$RELEASE_TAG" == "latest" ]]; then
+    echo "Checking latest published release of $GITHUB_REPO ..."
+    latest_url="$(curl --fail --silent --show-error --location --retry 3 \
+        --connect-timeout 15 --max-time 60 --output /dev/null \
+        --write-out '%{url_effective}' \
+        "https://github.com/${GITHUB_REPO}/releases/latest")" || {
+        echo 'ERROR: Failed to resolve the latest GitHub release.' >&2
+        exit 1
+    }
+    latest_prefix="https://github.com/${GITHUB_REPO}/releases/tag/"
+    case "$latest_url" in
+        "$latest_prefix"*) RELEASE_TAG="${latest_url#"$latest_prefix"}" ;;
+        *) echo "ERROR: Unexpected latest-release redirect: $latest_url" >&2; exit 1 ;;
+    esac
+    [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || {
+        echo "ERROR: Invalid release tag returned by GitHub: $RELEASE_TAG" >&2
+        exit 1
+    }
+    echo "Latest stable release: $RELEASE_TAG"
+fi
+
 # Prevent two installers from replacing the same application at once.
 exec 9> /run/immich-alpine-install.lock
-flock -n 9 || { echo 'ERROR: Another Immich installer is already running.' >&2; exit 1; }
+flock -n 9 || { echo 'ERROR: Another Immich installer is running.' >&2; exit 1; }
 
 mkdir -p "$IMMICH_PATH" "$IMMICH_LOG_PATH" "$BACKUP_ROOT"
 chmod 700 "$BACKUP_ROOT"
@@ -277,10 +306,10 @@ NODE_OPTIONS="--max-old-space-size=512"
 ENV
     chown immich:immich "$IMMICH_PATH/env"
     chmod 600 "$IMMICH_PATH/env"
-    echo "Created $IMMICH_PATH/env; Please edit DB/Redis credentials before starting."
+    echo "Created $IMMICH_PATH/env; edit DB/Redis credentials before starting."
 fi
 
-# --- Install OpenRC scripts atomically ---
+# --- Install OpenRC scripts atomically. Quoted heredocs preserve OpenRC vars. ---
 cat > "/etc/init.d/.immich.new.$$" <<'OPENRC'
 #!/sbin/openrc-run
 name="immich"
@@ -336,7 +365,7 @@ if (( IS_UPGRADE )); then
         fi
         sleep 2
     done
-    (( healthy )) || { echo 'ERROR: Health check failed. Backup and pending state preserved. Please try again.' >&2; exit 1; }
+    (( healthy )) || { echo 'ERROR: Health check failed. Backup and pending state preserved.' >&2; exit 1; }
 
     # Commit the new version ONLY after verifying the upgraded services.
     printf '%s\n' "$RELEASE_TAG" > "$VERSION_FILE.tmp.$$"
