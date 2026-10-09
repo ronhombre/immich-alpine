@@ -14,7 +14,14 @@ supported. Though, you are welcome to try them out, but it won't be as simple as
 > 2.25GB to 8GB. This should be fine for most people since most hypervisors only use storage that's actually used by
 > the VMs and the CTs.)
 
-## Installation (and Upgrading)
+## Quick Installation (and Upgrading)
+```bash
+wget -qO install-immich-alpine.sh https://raw.githubusercontent.com/ronhombre/immich-alpine/main/install-immich-alpine.sh && bash install-immich-alpine.sh
+```
+
+This automatically installs (and upgrades to) the latest version [release](https://github.com/ronhombre/immich-alpine/releases).
+
+## Advanced Installation (and Upgrading)
 
 ```bash
 # Download the install script
