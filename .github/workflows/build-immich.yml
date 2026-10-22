@@ -8,7 +8,7 @@ on:
       immich_rev:
         description: 'Upstream Immich tag, branch, or commit'
         required: true
-        default: 'v3.2.0'
+        default: 'v3.3.5'
       release_tag:
         description: 'Release tag to attach the APK to (optional)'
         required: false
@@ -20,13 +20,13 @@ on:
       apk_release:
         description: 'Alpine package revision (0, 1, 2, ...)'
         required: false
-        default: '0'
+        default: '1'
       apk_maintainer:
         description: 'Package maintainer, e.g. Your Name <you@example.com> (public metadata)'
         required: false
         default: 'Ron Lauren Hombre <ronlauren@hombre.asia>'
       bundle_runtime:
-        description: 'Embed additional runtime APKs in the Immich package'
+        description: 'Include required runtime library files in the Immich APK'
         type: boolean
         required: false
         default: true
@@ -35,8 +35,9 @@ on:
         required: false
         default: ''
 
-# Optional repository secret: APK_SIGNING_KEY contains an unencrypted PEM
-# private key. Only its public half is published with the APK.
+# Environment secret in Auto Build: APK_SIGNING_KEY contains an unencrypted
+# PEM private key. It is required for release uploads; artifact-only builds
+# may run unsigned. Only its public half is published with the APK.
 # Optional repository variable: APK_MAINTAINER supplies the public maintainer
 # field; the manual apk_maintainer input overrides it for one build.
 # APK_DESCRIPTION and APK_URL repository variables may customize those public
@@ -47,7 +48,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-26.04
-    environment: "Auto Build"
+    environment: Auto Build
     container:
       image: alpine:3.24
       options: --user root
@@ -56,6 +57,9 @@ jobs:
         shell: bash
     env:
       ARTIFACT_DIR: /tmp/immich-alpine-dist
+      # Auto Release dispatches this workflow with a release_tag, so checking
+      # only for a release event would miss that release-signing requirement.
+      REQUIRE_APK_SIGNING: ${{ github.event_name == 'release' || inputs.release_tag != '' }}
 
     steps:
       - name: Bootstrap Bash and checkout dependencies
@@ -95,6 +99,21 @@ jobs:
           }
           printf 'immich_rev=%s\nrelease_tag=%s\n' "$immich_rev" "$release_tag" >> "$GITHUB_OUTPUT"
 
+      - name: Check APK signing configuration
+        env:
+          APK_SIGNING_KEY_PEM: ${{ secrets.APK_SIGNING_KEY }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if [[ -n "${APK_SIGNING_KEY_PEM//[[:space:]]/}" ]]; then
+            echo 'APK signing key is available from the Auto Build environment.'
+          elif [[ "$REQUIRE_APK_SIGNING" == true ]]; then
+            echo '::error::APK_SIGNING_KEY is unavailable in the Auto Build environment. A signed release is required; refusing to build or upload an unsigned APK.'
+            exit 1
+          else
+            echo '::warning::APK_SIGNING_KEY is unavailable. This artifact-only build will produce an unsigned APK.'
+          fi
+
       - name: Install build dependencies
         run: |
           set -Eeuo pipefail
@@ -116,12 +135,11 @@ jobs:
             py3-opencv py3-onnxruntime py3-numpy-dev geos-dev py3-shapely \
             protobuf-dev py3-nanobind py3-yaml
 
-          # Immich v3.2.0 uses Sharp 0.35.3, which needs libvips >=8.18.3;
-          # Alpine 3.24 currently provides 8.18.2. Retain the original builder's
-          # Edge override and keep the related vips packages aligned. By default
-          # the builder embeds the minimal required Edge runtime APKs inside the
-          # Immich APK; the supplied installer installs those embedded packages.
-          # When embedding is disabled, provide compatible runtime libraries.
+          # Use the newer native libraries required by Sharp while keeping the
+          # related vips packages aligned. By default the builder merges the
+          # required runtime library files into the Immich APK, so ordinary
+          # apk add installs them with the application. When bundling is
+          # disabled, provide compatible runtime libraries separately.
           apk add --upgrade --no-cache \
             --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
             vips vips-cpp vips-dev vips-jxl libraw libraw-dev
@@ -132,7 +150,7 @@ jobs:
           IMMICH_REV: ${{ steps.rev.outputs.immich_rev }}
           IMMICH_ALPINE_RELEASE: ${{ steps.rev.outputs.release_tag }}
           APK_VERSION: ${{ inputs.apk_version }}
-          APK_RELEASE: ${{ inputs.apk_release || '0' }}
+          APK_RELEASE: ${{ inputs.apk_release || '1' }}
           APK_MAINTAINER: ${{ inputs.apk_maintainer || vars.APK_MAINTAINER }}
           APK_DESCRIPTION: ${{ vars.APK_DESCRIPTION }}
           APK_URL: ${{ vars.APK_URL }}
@@ -144,13 +162,17 @@ jobs:
         run: |
           set -Eeuo pipefail
           set +x
+          if [[ "$REQUIRE_APK_SIGNING" == true && -z "${APK_SIGNING_KEY_PEM//[[:space:]]/}" ]]; then
+            echo '::error::Release signing requires APK_SIGNING_KEY from the Auto Build environment.'
+            exit 1
+          fi
           signing_dir=''
           signing_args=()
           cleanup_signing() {
             [[ -z "$signing_dir" ]] || rm -rf -- "$signing_dir"
           }
           trap cleanup_signing EXIT
-          if [[ -n "$APK_SIGNING_KEY_PEM" ]]; then
+          if [[ -n "${APK_SIGNING_KEY_PEM//[[:space:]]/}" ]]; then
             signing_dir="$(mktemp -d /tmp/immich-apk-signing.XXXXXXXX)"
             printf 'signing_dir=%s\n' "$signing_dir" >> "$GITHUB_OUTPUT"
             (umask 077; printf '%s\n' "$APK_SIGNING_KEY_PEM" > "$signing_dir/immich.rsa")
@@ -174,10 +196,17 @@ jobs:
           output_files=("$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256")
           if (( ${#signing_args[@]} )); then
             [[ -f "$ARTIFACT_DIR/$asset.pub" && ! -L "$ARTIFACT_DIR/$asset.pub" && -s "$ARTIFACT_DIR/$asset.pub" ]]
+            # Verify with the supplied key's public half, without allowing an
+            # unsigned package or relying on unrelated system-trusted keys.
+            mkdir -m 0700 "$signing_dir/verification-keys"
+            openssl pkey -in "$signing_dir/immich.rsa" -passin pass: -pubout \
+              -out "$signing_dir/verification-keys/immich.rsa.pub"
+            cmp -s "$signing_dir/verification-keys/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"
+            apk verify --keys-dir "$signing_dir/verification-keys" "$ARTIFACT_DIR/$asset"
             output_files+=("$ARTIFACT_DIR/$asset.pub")
           fi
 
-          # Runtime APKs are contained in the main APK. Publish only these two
+          # Runtime library files belong to the main APK. Publish only these two
           # or three named files, including when old build outputs still exist.
           {
             printf 'arch=%s\nfiles<<IMMICH_APK_FILES\n' "$arch"
@@ -191,7 +220,7 @@ jobs:
           SIGNING_DIR: ${{ steps.build.outputs.signing_dir }}
         run: |
           if [[ "$SIGNING_DIR" == /tmp/immich-apk-signing.* ]]; then
-            rm -rf -- "$SIGNING_DIR"
+            find "$SIGNING_DIR" -type f -exec shred -uz {} + && rm -rf "$SIGNING_DIR"
           fi
 
       - name: Upload APK to GitHub Release

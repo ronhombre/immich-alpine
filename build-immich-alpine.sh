@@ -15,7 +15,7 @@ IMMICH_EXPECTED_COMMIT="${IMMICH_EXPECTED_COMMIT:-}"
 IMMICH_ALPINE_RELEASE="${IMMICH_ALPINE_RELEASE:-}"
 SOURCE_REPO="${IMMICH_SOURCE_REPO:-https://github.com/immich-app/immich.git}"
 APK_VERSION="${APK_VERSION:-}"
-APK_RELEASE="${APK_RELEASE:-0}"
+APK_RELEASE="${APK_RELEASE:-1}"
 APK_SIGNING_KEY="${APK_SIGNING_KEY:-}"
 APK_MAINTAINER="${APK_MAINTAINER:-}"
 APK_DESCRIPTION="${APK_DESCRIPTION:-Immich photo and video management for Alpine Linux}"
@@ -27,10 +27,10 @@ export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=4096}"
 usage() {
   cat <<'HELP'
 Usage (root, disposable Alpine 3.24 builder with apk-tools 3.x):
-  IMMICH_REV=v3.2.0 bash build-immich-alpine.sh
-  IMMICH_REV=v3.2.0 bash build-immich-alpine.sh --signing-key /run/keys/immich.rsa
-  IMMICH_REV=v3.2.0 APK_SIGNING_KEY=/run/keys/immich.rsa bash build-immich-alpine.sh
-  IMMICH_REV=v3.2.0 bash build-immich-alpine.sh --maintainer 'Your Name <you@example.com>'
+  IMMICH_REV=v3.3.5 bash build-immich-alpine.sh
+  IMMICH_REV=v3.3.5 bash build-immich-alpine.sh --signing-key /run/keys/immich.rsa
+  IMMICH_REV=v3.3.5 APK_SIGNING_KEY=/run/keys/immich.rsa bash build-immich-alpine.sh
+  IMMICH_REV=v3.3.5 bash build-immich-alpine.sh --maintainer 'Your Name <you@example.com>'
 
   bash build-immich-alpine.sh --verify-apk /path/to/package.apk
   bash build-immich-alpine.sh --verify-apk /path/to/package.apk --keys-dir /path/to/public-keys
@@ -43,10 +43,11 @@ Options:
   --maintainer TEXT     Public package contact, normally 'Name <email>'.
   --description TEXT   Human-readable package description.
   --url URL            Package information/project URL.
-  --no-bundle-runtime  Skip embedded runtime APKs; targets must then supply
+  --no-bundle-runtime  Skip merging newer runtime files; targets must then supply
                        repositories containing the required native libraries.
   --package-only       Package an already completed app in the disposable builder.
-                       Requires the same IMMICH_REV/APK_VERSION as that build.
+                       Requires the same IMMICH_REV/APK_VERSION as that build;
+                       APK_RELEASE may be increased for a packaging-only fix.
                        Native runtime package versions must also match its metadata.
   --verify-apk PATH    Verify integrity/signature, metadata, and payload paths.
   --keys-dir PATH      Public-key directory for --verify-apk (default: system keys).
@@ -56,13 +57,13 @@ Environment:
   APK_VERSION          Alpine version; default: IMMICH_REV without its leading v.
                        Set explicitly for branches, commits, or prereleases
                        (example: APK_VERSION=3.2.0_rc1 for v3.2.0-rc.1).
-  APK_RELEASE          Alpine packaging revision; default: 0. Bump on a rebuild
+  APK_RELEASE          Alpine packaging revision; default: 1. Bump on a rebuild
                        of the same upstream version.
   APK_SIGNING_KEY       Private-key path; --signing-key takes precedence.
   APK_MAINTAINER        Public maintainer contact; omitted when unset.
   APK_DESCRIPTION       Package description; default: Immich for Alpine description.
   APK_URL               Package information URL; default: https://immich.app.
-  APK_BUNDLE_RUNTIME    1 (default): embed exact installed runtime APKs that are
+  APK_BUNDLE_RUNTIME    1 (default): merge verified runtime package files that are
                        unavailable in Alpine 3.24 stable. Set 0 to opt out.
   APK_RUNTIME_REPOSITORY Extra build-time source for those packages; default:
                        https://dl-cdn.alpinelinux.org/alpine/edge/community.
@@ -76,11 +77,13 @@ Outputs (arch is x86_64 or aarch64):
   $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk.sha256
   $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk.pub  (only when signed)
 
-Required additional runtime APKs and their checksum manifest are INSIDE the
-Immich APK under /usr/share/immich. Its signature protects the whole bundle.
-Use the supplied installer: it extracts and verifies these original Alpine
-APKs, then installs them with Immich in one APK transaction. There are no
-separate dependency release assets. Ordinary dependencies come from stable.
+Required newer runtime files are part of the Immich APK itself. The package
+declares their real package names, versions, shared-library provides, and
+remaining dependencies. Install it directly with apk add ./immich-....apk.
+Native APK hooks create the account/configuration, enable OpenRC services, and
+handle service state and application/configuration backups on upgrades.
+There are no nested dependency APKs or separate dependency release assets.
+Ordinary dependencies come from Alpine 3.24 stable repositories.
 
 With no key, the package is unsigned; installation requires an explicit
 apk add --allow-untrusted. Signed installs require the matching public key
@@ -135,13 +138,17 @@ for name in sorted(versions):
 
 # Validate staged or extracted bytes without sourcing anything from the package.
 validate_payload() {
-  python3 - "$1" <<'PY'
+  local runtime_paths
+  runtime_paths="$(validate_bundled_runtime "$1")" || return
+  python3 - "$1" "$runtime_paths" <<'PY'
 from pathlib import Path
-import hashlib, os, re, stat, sys
+import os, stat, sys
 root = Path(sys.argv[1])
 app = root / 'var/lib/immich/app'
 def fail(message):
     raise SystemExit('Invalid APK payload: ' + message)
+if app.is_symlink() or not app.is_dir():
+    fail('application root must be a regular directory')
 files = [
     'start.sh', 'dist/main.js', 'machine-learning/start.sh',
     'machine-learning/log_conf.json', 'machine-learning/immich_ml/gunicorn_conf.py',
@@ -163,7 +170,7 @@ for name in ('start.sh', 'machine-learning/start.sh'):
     if not os.stat(app / name).st_mode & 0o111:
         fail('launcher is not executable: ' + name)
 for name in ('etc/init.d/immich', 'etc/init.d/immich-ml',
-             'usr/share/immich/immich.env.example', 'usr/share/immich/runtime-apks.sha256'):
+             'usr/share/immich/immich.env.example', 'usr/share/immich/bundled-runtime.json'):
     p = root / name
     if not p.is_file() or p.is_symlink():
         fail('missing package support file: ' + name)
@@ -177,29 +184,13 @@ for name in ('upload', 'machine-learning/upload'):
 parents = {'etc', 'etc/init.d', 'usr', 'usr/share', 'usr/share/immich',
            'var', 'var/lib', 'var/lib/immich', 'var/lib/immich/app'}
 support = {'etc/init.d/immich', 'etc/init.d/immich-ml',
-           'usr/share/immich/immich.env.example', 'usr/share/immich/runtime-apks.sha256',
+           'usr/share/immich/immich.env.example', 'usr/share/immich/bundled-runtime.json',
            'var/lib/immich/i18n'}
-bundle = root / 'usr/share/immich/runtime-apks'
-if not bundle.is_dir() or bundle.is_symlink():
-    fail('missing regular embedded runtime directory')
-parents.add('usr/share/immich/runtime-apks')
-seen = set()
-for line in (root / 'usr/share/immich/runtime-apks.sha256').read_text().splitlines():
-    match = re.fullmatch(r'([0-9a-f]{64})  ([a-z0-9][a-z0-9+_.-]*-[0-9][0-9a-z._]*-r[0-9]+\.(?:x86_64|aarch64)\.apk)', line)
-    if not match:
-        fail('invalid embedded runtime manifest entry')
-    expected, filename = match.groups()
-    if '..' in filename or filename in seen:
-        fail('unsafe or duplicate embedded runtime filename: ' + filename)
-    seen.add(filename)
-    p = bundle / filename
-    if not p.is_file() or p.is_symlink():
-        fail('missing regular embedded runtime APK: ' + filename)
-    with p.open('rb') as stream:
-        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
-    if actual != expected:
-        fail('embedded runtime APK checksum mismatch: ' + filename)
-    support.add('usr/share/immich/runtime-apks/' + filename)
+# Only exact paths whose original-package provenance, contents, permissions,
+# and symlink targets passed validate_bundled_runtime are authorized here.
+for name in sys.argv[2].splitlines():
+    support.add(name)
+    parents.update(p.as_posix() for p in Path(name).parents if p != Path('.'))
 for base, dirs, names in os.walk(root, followlinks=False):
     for name in dirs + names:
         p = Path(base, name)
@@ -228,22 +219,43 @@ verify_apk() (
   apk verify "$@" "$package"
   check_dir="$(mktemp -d)"
   trap 'rm -rf -- "$check_dir"' EXIT
-  apk adbdump "$package" > "$check_dir/metadata"
+  apk adbdump --format json "$package" > "$check_dir/metadata"
   python3 - "$check_dir/metadata" <<'PY'
 from pathlib import Path
-import re, sys
-s = Path(sys.argv[1]).read_text()
-m = re.search(r'^info:\n((?:[ \t].*\n|\n)*)', s, re.M)
-if not m or not re.search(r'^  name: immich$', m[1], re.M):
+import json, re, sys
+data = json.loads(Path(sys.argv[1]).read_text())
+info = data.get('info', {})
+if info.get('name') != 'immich':
     raise SystemExit('Expected APKv3 package named immich')
-if not re.search(r'^  version: [0-9][A-Za-z0-9._]*-r[0-9]+$', m[1], re.M):
+if not re.fullmatch(r'[0-9][A-Za-z0-9._]*-r[0-9]+', info.get('version', '')):
     raise SystemExit('Missing or invalid Immich package version')
-if not re.search(r'^  arch: (x86_64|aarch64)$', m[1], re.M):
+if info.get('arch') not in ('x86_64', 'aarch64'):
     raise SystemExit('Missing or unsupported Immich package architecture')
+for action in ('pre-install', 'post-install', 'pre-upgrade', 'post-upgrade', 'pre-deinstall', 'post-deinstall'):
+    script = data.get('scripts', {}).get(action, '')
+    if not isinstance(script, str) or not script.startswith('#!/bin/sh\n'):
+        raise SystemExit('Missing native APK lifecycle script: ' + action)
 PY
   mkdir "$check_dir/root"
   apk extract "$@" --destination "$check_dir/root" "$package"
   validate_payload "$check_dir/root"
+  python3 - "$check_dir/metadata" "$check_dir/root" <<'PY'
+from pathlib import Path
+import json, sys
+info = json.loads(Path(sys.argv[1]).read_text())['info']
+root = Path(sys.argv[2])
+audit = json.loads((root / 'usr/share/immich/bundled-runtime.json').read_text())
+for field in ('provides', 'replaces'):
+    if sorted(info.get(field, [])) != sorted(audit[field]):
+        raise SystemExit('APK metadata does not declare its actual bundled runtime ' + field)
+if not set(audit['depends']) <= set(info.get('depends', [])):
+    raise SystemExit('APK metadata omits an external bundled-runtime dependency')
+if info.get('license') != audit['license']:
+    raise SystemExit('APK license metadata does not match its bundled runtime')
+build_lines = (root / 'var/lib/immich/app/.build-info').read_text().splitlines()
+if 'apk_version=' + info['version'] not in build_lines or 'apk_layout=native-merged-v1' not in build_lines:
+    raise SystemExit('Application build metadata does not match this native APK')
+PY
   log "APK verified: $package"
 )
 
@@ -288,6 +300,7 @@ OPENRC
 # Configure external PostgreSQL and Redis before starting Immich.
 IMMICH_HOST=127.0.0.1
 IMMICH_PORT=2283
+IMMICH_MEDIA_LOCATION=/var/lib/immich/upload
 DB_HOSTNAME=your-postgres-host
 DB_PORT=5432
 DB_USERNAME=immich
@@ -305,53 +318,318 @@ TRANSFORMERS_CACHE=/var/lib/immich/cache
 HF_HOME=/var/lib/immich/cache/hf-cache
 NODE_OPTIONS="--max-old-space-size=512"
 ENV
-  cat > "$scripts/pre-install" <<'HOOK'
+  # Inline the common implementation in all six APK hooks: pre-install cannot
+  # rely on a helper from the package having been unpacked already.
+  cat > "$scripts/lifecycle" <<'HOOK'
 #!/bin/sh
 set -eu
-getent group immich >/dev/null 2>&1 || addgroup -S immich
-if ! id immich >/dev/null 2>&1; then
-    adduser -S -D -H -h /var/lib/immich/home -s /sbin/nologin -G immich immich
-fi
-HOOK
-  cat > "$scripts/post-install" <<'HOOK'
-#!/bin/sh
-set -eu
-for path in /var/lib/immich/home /var/lib/immich/upload /var/lib/immich/cache /var/log/immich; do
-    install -d -m 0750 -o immich -g immich "$path"
-done
-if [ ! -e /var/lib/immich/env ]; then
-    [ ! -L /var/lib/immich/env ] || { echo 'Dangling env symlink; fix it before starting Immich.' >&2; exit 1; }
-    install -m 0600 -o immich -g immich /usr/share/immich/immich.env.example /var/lib/immich/env
-fi
-echo 'Immich installed. Configure /var/lib/immich/env, then start immich-ml and immich with rc-service.'
-echo 'Enable boot startup with: rc-update add immich-ml default; rc-update add immich default'
-HOOK
-  cat > "$scripts/stop-services" <<'HOOK'
-#!/bin/sh
-set -eu
-for service in immich immich-ml; do
-    if [ -x "/etc/init.d/$service" ]; then
-        rc-service "$service" stop 2>/dev/null || true
-        if rc-service "$service" status >/dev/null 2>&1; then
-            echo "ERROR: Could not stop $service. Stop it manually before continuing." >&2
-            exit 1
+umask 077
+base=/var/lib/immich
+state=$base/.apk-state
+backups=$base/backups
+pending=$state/pending
+prepared=$state/prepared
+backup=''
+source_version=''
+restart_server=0
+restart_ml=0
+target_version=${1:-}
+old_version=${2:-}
+hook=${APK_SCRIPT:-}
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+safe_dir() {
+    [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -d "$1" ]; } || fail "Unsafe directory: $1"
+}
+safe_file() {
+    [ ! -L "$1" ] && { [ ! -e "$1" ] || [ -f "$1" ]; } || fail "Unsafe state/configuration file: $1"
+}
+valid_version() {
+    case "$1" in ''|*[!A-Za-z0-9._+-]*) fail 'Invalid version in package lifecycle state.' ;; esac
+}
+guard_paths() {
+    for path in /var /var/lib /var/log "$base" "$base/app" "$state" "$backups" \
+        "$base/home" "$base/upload" "$base/cache" /var/log/immich; do
+        safe_dir "$path"
+    done
+    for path in "$base/env" "$base/.immich-version" "$pending" "$prepared" \
+        "$state/pending.new" "$state/prepared.new" "$state/version.new"; do
+        safe_file "$path"
+    done
+}
+failed_hook() {
+    result=$?
+    trap - 0
+    if [ "$result" -ne 0 ]; then
+        printf 'ERROR: Immich %s failed. APK may have changed package files; no automatic rollback was performed.\n' "$hook" >&2
+        if [ -n "$backup" ]; then
+            printf 'ERROR: Snapshot/state retained: %s ; %s\n' "$backup" "$pending" >&2
         fi
+        echo 'ERROR: Fix the reported problem, then use apk fix --reinstall immich with this APK available in the APK cache or a configured repository.' >&2
     fi
-done
-HOOK
-  cat > "$scripts/post-deinstall" <<'HOOK'
-#!/bin/sh
-for service in immich immich-ml; do
-    rc-update del "$service" default >/dev/null 2>&1 || true
-done
-# Account, credentials, media, caches, and backups deliberately remain.
-exit 0
-HOOK
-  chmod 0755 "$scripts/"*
+    exit "$result"
+}
+trap failed_hook 0
+
+ensure_account() {
+    grep -q '^immich:' /etc/group || addgroup -S immich
+    if ! id -u immich >/dev/null 2>&1; then
+        adduser -S -D -H -h "$base/home" -s /sbin/nologin -G immich immich
+    fi
+}
+prepare_state() {
+    guard_paths
+    mkdir -p "$base" "$state" "$backups"
+    chown 0:0 "$state" "$backups"
+    chmod 0700 "$state" "$backups"
+    # Protect root-written state even when migrating an older installer that
+    # made the parent directory writable by the service account.
+    chown 0:0 "$base"
+    chmod 0755 "$base"
+}
+read_pending() {
+    [ "$(awk 'END { print NR }' "$pending")" = 5 ] || fail 'Invalid pending APK upgrade record.'
+    source_version=$(sed -n '1p' "$pending")
+    saved_target=$(sed -n '2p' "$pending")
+    backup_name=$(sed -n '3p' "$pending")
+    restart_server=$(sed -n '4p' "$pending")
+    restart_ml=$(sed -n '5p' "$pending")
+    valid_version "$source_version"
+    valid_version "$saved_target"
+    case "$backup_name" in native-*) ;; *) fail 'Unexpected pending backup name.' ;; esac
+    case "$backup_name" in *[!A-Za-z0-9-]*) fail 'Unsafe pending backup name.' ;; esac
+    case "$restart_server:$restart_ml" in 0:0|0:1|1:0|1:1) ;; *) fail 'Invalid saved service state.' ;; esac
+    backup=$backups/$backup_name
+    safe_dir "$backup"
+    for path in "$backup/app.tar" "$backup/env" "$backup/source.version" \
+        "$backup/backup.complete" "$backup/native-format" "$backup/attempts.log" \
+        "$backup/upgrade.success" "$backup/health.success"; do safe_file "$path"; done
+    [ -f "$backup/backup.complete" ] && [ -f "$backup/app.tar" ] && \
+        [ "$(cat "$backup/native-format")" = immich-apk-v1 ] && \
+        [ "$(cat "$backup/source.version")" = "$source_version" ] || \
+        fail 'Pending snapshot is incomplete. Inspect it before retrying; APK may already have replaced application files.'
+}
+write_pending() {
+    printf '%s\n%s\n%s\n%s\n%s\n' "$source_version" "$target_version" \
+        "${backup##*/}" "$restart_server" "$restart_ml" > "$state/pending.new"
+    mv "$state/pending.new" "$pending"
+}
+running() {
+    [ -x "/etc/init.d/$1" ] && rc-service "$1" status >/dev/null 2>&1
+}
+stop_services() {
+    for service in immich immich-ml; do
+        if running "$service"; then
+            rc-service --nodeps "$service" stop || fail "Could not stop $service."
+            running "$service" && fail "$service is still running after stop."
+        fi
+    done
+    return 0
+}
+pre_install_or_upgrade() {
+    prepare_state
+    # A failed pre hook must never leave an old approval for the post hook.
+    rm -f "$prepared"
+    ensure_account
+    valid_version "$target_version"
+    if [ -f "$pending" ]; then
+        read_pending
+        echo "Reusing completed Immich snapshot: $backup"
+        stop_services
+        write_pending
+    elif [ -d "$base/app" ]; then
+        if [ -e "$base/.upgrade-pending" ] || [ -L "$base/.upgrade-pending" ]; then
+            fail 'An earlier standalone installer upgrade is pending. Preserve its backup and resolve that state before native package recovery.'
+        fi
+        [ -f "$base/app/start.sh" ] && [ ! -L "$base/app/start.sh" ] || fail 'Cannot snapshot an incomplete existing application.'
+        if [ -n "$old_version" ]; then
+            valid_version "$old_version"
+            source_version=apk-$old_version
+        elif [ -f "$base/.immich-version" ]; then
+            source_version=$(cat "$base/.immich-version")
+            valid_version "$source_version"
+        else
+            source_version=legacy-unversioned
+        fi
+        running immich && restart_server=1
+        running immich-ml && restart_ml=1
+        backup=$backups/native-$(date -u +%Y%m%dT%H%M%SZ)-$$
+        mkdir -m 0700 "$backup"
+        printf '%s\n' immich-apk-v1 > "$backup/native-format"
+        printf '%s\n' "$source_version" > "$backup/source.version"
+        # Persist original service intent before stopping anything. A retry must
+        # not interpret services stopped by a failed attempt as intentionally off.
+        write_pending
+        stop_services
+        # No dereferencing: media links remain links, and actual runtime data
+        # directories are excluded even in a legacy application layout.
+        tar -C "$base" \
+            --exclude=app/upload --exclude=app/home --exclude=app/cache \
+            --exclude=app/.cache --exclude=app/backups \
+            --exclude=app/machine-learning/upload --exclude=app/machine-learning/cache \
+            --exclude=app/machine-learning/.cache \
+            -cf "$backup/app.tar" app
+        if [ -f "$base/env" ]; then cp -p "$base/env" "$backup/env"; chmod 0600 "$backup/env"; fi
+        printf 'completed_at=%s\n' "$(now)" > "$backup/backup.complete.new"
+        mv "$backup/backup.complete.new" "$backup/backup.complete"
+        echo "Completed Immich application/configuration snapshot: $backup"
+    elif [ -n "$old_version" ]; then
+        fail 'Installed application is missing and no completed upgrade snapshot is recorded.'
+    fi
+    if [ -n "$backup" ]; then
+        printf '%s\tto=%s\tstarted\n' "$(now)" "$target_version" >> "$backup/attempts.log"
+        printf '%s\nupgrade\n' "$target_version" > "$state/prepared.new"
+    else
+        printf '%s\nfresh\n' "$target_version" > "$state/prepared.new"
+    fi
+    mv "$state/prepared.new" "$prepared"
+}
+setup_runtime() {
+    ensure_account
+    chown root:immich "$base"
+    chmod 0750 "$base"
+    for path in "$base/home" "$base/upload" "$base/cache" /var/log/immich; do
+        mkdir -p "$path"
+        chown immich:immich "$path"
+        chmod 0750 "$path"
+    done
+    if [ ! -e "$base/env" ]; then
+        cp /usr/share/immich/immich.env.example "$base/env"
+        echo 'Created /var/lib/immich/env. Configure external PostgreSQL and Redis before starting Immich.'
+    fi
+    chown immich:immich "$base/env"
+    chmod 0600 "$base/env"
+    [ -x "$base/app/start.sh" ] && [ -f "$base/app/dist/main.js" ] && \
+        [ -x "$base/app/machine-learning/start.sh" ] || fail 'Installed application files are incomplete.'
+}
+# Read only literal bind settings; never source service-owned configuration as
+# root. Expansion/command substitutions are intentionally not evaluated here.
+config_literal() {
+    value=$(awk -v key="$1" '
+        $0 ~ "^[ \t]*(export[ \t]+)?" key "=" {
+            value=$0
+            sub("^[ \t]*(export[ \t]+)?" key "=", "", value)
+            sub(/[ \t]+#.*/, "", value)
+            sub(/[ \t]+$/, "", value)
+        }
+        END { print value }
+    ' "$base/env")
+    case "$value" in \"*\") value=${value#\"}; value=${value%\"} ;; \'*\') value=${value#\'}; value=${value%\'} ;; esac
+    printf '%s' "$value"
+}
+health_url() {
+    host=$(config_literal "$1")
+    port=$(config_literal "$2")
+    host=${host:-127.0.0.1}
+    port=${port:-$3}
+    case "$host" in 0.0.0.0|localhost) host=127.0.0.1 ;; ::|'[::]') host='[::1]' ;; esac
+    case "$host" in ''|*[!A-Za-z0-9._:\[\]-]*) fail 'Health checks require literal bind hostnames/IP addresses in /var/lib/immich/env.' ;; esac
+    case "$port" in ''|*[!0-9]*) fail 'Health checks require literal numeric ports in /var/lib/immich/env.' ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || fail 'Invalid configured health-check port.'
+    case "$host" in \[*\]) ;; *:*) host=[$host] ;; esac
+    printf 'http://%s:%s%s' "$host" "$port" "$4"
+}
+check_restarted_services() {
+    server_url=''
+    ml_url=''
+    if [ "$restart_server" = 1 ]; then server_url=$(health_url IMMICH_HOST IMMICH_PORT 2283 /api/server/ping); fi
+    if [ "$restart_ml" = 1 ]; then ml_url=$(health_url MACHINE_LEARNING_HOST MACHINE_LEARNING_PORT 3003 /ping); fi
+    attempt=0
+    while [ "$attempt" -lt 30 ]; do
+        healthy=1
+        if [ "$restart_ml" = 1 ]; then
+            running immich-ml && curl --silent --show-error --fail --max-time 3 --output /dev/null "$ml_url" 2>/dev/null || healthy=0
+        fi
+        if [ "$restart_server" = 1 ]; then
+            running immich && curl --silent --show-error --fail --max-time 3 --output /dev/null "$server_url" 2>/dev/null || healthy=0
+        fi
+        [ "$healthy" = 1 ] && return 0
+        attempt=$((attempt + 1))
+        [ "$attempt" -ge 30 ] || sleep 2
+    done
+    fail 'A restarted Immich service failed its health check. Inspect /var/log/immich; the completed snapshot and pending state remain.'
+}
+prune_native_backups() {
+    for previous in "$backups"/native-*; do
+        [ "$previous" != "$backup" ] && [ -d "$previous" ] && [ ! -L "$previous" ] || continue
+        [ -f "$previous/native-format" ] && [ ! -L "$previous/native-format" ] && \
+            [ "$(cat "$previous/native-format")" = immich-apk-v1 ] || continue
+        [ -f "$previous/backup.complete" ] && [ ! -L "$previous/backup.complete" ] && \
+            [ -f "$previous/upgrade.success" ] && [ ! -L "$previous/upgrade.success" ] && \
+            [ -f "$previous/app.tar" ] && [ ! -L "$previous/app.tar" ] || continue
+        rm -rf "$previous" || echo "WARNING: Could not prune $previous" >&2
+    done
+}
+post_install_or_upgrade() {
+    guard_paths
+    valid_version "$target_version"
+    [ -f "$prepared" ] && [ "$(awk 'END { print NR }' "$prepared")" = 2 ] && \
+        [ "$(sed -n '1p' "$prepared")" = "$target_version" ] || \
+        fail 'Pre-install/upgrade preparation did not complete; services will not be started and success will not be recorded.'
+    phase=$(sed -n '2p' "$prepared")
+    case "$phase" in
+        upgrade)
+            [ -f "$pending" ] || fail 'Prepared upgrade has no pending snapshot record.'
+            read_pending
+            [ "$saved_target" = "$target_version" ] || fail 'Prepared and pending target versions do not match.' ;;
+        fresh) [ ! -e "$pending" ] || fail 'Fresh installation has unexpected pending upgrade state.' ;;
+        *) fail 'Invalid prepared installation phase.' ;;
+    esac
+    setup_runtime
+    if [ "$phase" = fresh ]; then
+        rc-update add immich-ml default
+        rc-update add immich default
+    else
+        # --nodeps prevents OpenRC from starting an intentionally stopped
+        # dependency while restoring the exact prior service running state.
+        if [ "$restart_ml" = 1 ]; then rc-service --nodeps immich-ml start; fi
+        if [ "$restart_server" = 1 ]; then rc-service --nodeps immich start; fi
+        if [ "$restart_server:$restart_ml" != 0:0 ]; then
+            check_restarted_services
+            printf 'healthy_at=%s\n' "$(now)" > "$backup/health.success"
+        fi
+        printf '%s\tto=%s\tservices=%s:%s\n' "$(now)" "$target_version" "$restart_server" "$restart_ml" > "$backup/upgrade.success"
+        printf '%s\tto=%s\tsucceeded\n' "$(now)" "$target_version" >> "$backup/attempts.log"
+    fi
+    printf 'apk-%s\n' "$target_version" > "$state/version.new"
+    mv "$state/version.new" "$base/.immich-version"
+    rm -f "$pending" "$prepared"
+    if [ "$phase" = fresh ]; then
+        echo 'Immich installed and enabled at boot; services remain stopped.'
+        echo 'Configure /var/lib/immich/env, then run: rc-service immich-ml start; rc-service immich start'
+    else
+        # A repair of the same version must not discard the snapshot of the
+        # earlier package version that remains useful for manual recovery.
+        [ "$source_version" = "apk-$target_version" ] || prune_native_backups
+        echo "Immich package upgrade completed. Retained snapshot: $backup"
+    fi
 }
 
-# Redistribute only installed runtime packages absent from Alpine 3.24's current
-# stable repositories. Preserve each original APK and Alpine signature unchanged.
+case "$hook" in
+    pre-install|pre-upgrade) pre_install_or_upgrade ;;
+    post-install|post-upgrade) post_install_or_upgrade ;;
+    pre-deinstall) guard_paths; stop_services ;;
+    post-deinstall)
+        for service in immich immich-ml; do
+            if [ -e "/etc/runlevels/default/$service" ] || [ -L "/etc/runlevels/default/$service" ]; then
+                rc-update del "$service" default
+            fi
+        done
+        echo 'Immich package removed. Account, configuration, media, caches and backups were retained.' ;;
+    *) fail 'Unexpected APK lifecycle action.' ;;
+esac
+HOOK
+  local hook
+  for hook in pre-install post-install pre-upgrade post-upgrade pre-deinstall post-deinstall; do
+    cp "$scripts/lifecycle" "$scripts/$hook"
+    chmod 0755 "$scripts/$hook"
+  done
+  rm "$scripts/lifecycle"
+}
+
+# Fetch only installed runtime packages absent from Alpine 3.24's current stable
+# repositories. Verify the original Alpine signatures before merging their files.
 # $PKG_WORK is a private temporary directory owned/cleaned by package_app's caller.
 bundle_runtime_apks() {
   local bundle_dir="$1" manifest_path="$2" work name version asset
@@ -428,7 +706,7 @@ for name, version in selected:
 (work / 'selected.tsv').write_text(''.join(name + '\t' + version + '\n' for name, version in selected))
 PY
   if [[ ! -s "$work/selected.tsv" ]]; then
-    log 'All installed runtime packages are available from Alpine 3.24; no embedded runtime APKs required.'
+    log 'All installed runtime packages are available from Alpine 3.24; no runtime files need merging.'
     return 0
   fi
 
@@ -446,20 +724,24 @@ PY
     asset="$name-$version.$APK_ARCH.apk"
     install -m 0644 "$work/fetched/$name-$version.apk" "$bundle_dir/$asset"
     (cd "$bundle_dir"; sha256sum "$asset") >> "$manifest_path"
-    log "Embedding runtime APK: $asset"
+    log "Verified runtime source package: $asset"
   done < "$work/selected.tsv"
 }
 
 # Called only by the root parent after all upstream build commands have finished.
 package_app() {
-  local stage scripts runtime_dir runtime_manifest source_sha build_ref
+  local stage scripts runtime_dir runtime_manifest runtime_metadata source_sha build_ref built_package_version
   local node_major vips_version libraw_version dependency_list current_runtime_versions recorded_runtime_versions
+  local runtime_provides runtime_replaces package_license
   local -a signing_args=() verify_args=(--allow-untrusted) metadata_args=()
-  [[ -f "$APP/.build-complete" && -f "$APP/.build-info" ]] || fatal 'No completed app to package.'
+  [[ -d "$APP" && ! -L "$APP" && -f "$APP/.build-complete" && ! -L "$APP/.build-complete" && \
+     -f "$APP/.build-info" && ! -L "$APP/.build-info" ]] || fatal 'No completed regular app and build metadata to package.'
   source_sha="$(sed -n 's/^immich_commit=//p' "$APP/.build-info")"
   build_ref="$(sed -n 's/^immich_ref=//p' "$APP/.build-info")"
   [[ "$source_sha" =~ ^[a-fA-F0-9]{40}$ && "$build_ref" == "$IMMICH_REV" ]] || fatal 'Build metadata does not match IMMICH_REV.'
-  [[ "$(sed -n 's/^apk_version=//p' "$APP/.build-info")" == "$APK_VERSION-r$APK_RELEASE" ]] || fatal 'APK_VERSION/APK_RELEASE must match the completed build.'
+  built_package_version="$(sed -n 's/^apk_version=//p' "$APP/.build-info")"
+  [[ "$built_package_version" =~ ^[0-9][A-Za-z0-9._]*-r[0-9]+$ && "${built_package_version%-r*}" == "$APK_VERSION" ]] || \
+    fatal 'APK_VERSION must match the completed application build; only the packaging revision may change.'
   node_major="$(sed -n 's/^node=//p' "$APP/.build-info")"
   [[ "$node_major" =~ ^v([0-9]+)\. ]] || fatal 'Cannot determine Node major version.'
   node_major="${BASH_REMATCH[1]}"
@@ -476,6 +758,7 @@ package_app() {
   scripts="$PKG_WORK/scripts"
   runtime_dir="$PKG_WORK/runtime-apks"
   runtime_manifest="$PKG_WORK/runtime-apks.sha256"
+  runtime_metadata="$PKG_WORK/runtime-metadata"
   mkdir "$runtime_dir"
   : > "$runtime_manifest"
   if (( APK_BUNDLE_RUNTIME )); then
@@ -486,8 +769,22 @@ package_app() {
   cp -a "$APP" "$stage/var/lib/immich/app"
   ln -s app/i18n "$stage/var/lib/immich/i18n"
   write_package_support "$stage" "$scripts"
-  install -m 0644 "$runtime_manifest" "$stage/usr/share/immich/runtime-apks.sha256"
-  cp -a "$runtime_dir" "$stage/usr/share/immich/runtime-apks"
+  # Originals are temporary build inputs. Their verified runtime files and
+  # truthful capabilities become part of this one native package.
+  merge_runtime_apks "$stage" "$runtime_dir" "$runtime_manifest" "$runtime_metadata"
+  # A packaging-only rebuild may increment -rN without recompiling the app.
+  # Update only the staged metadata, leaving the completed build untouched.
+  python3 - "$stage/var/lib/immich/app/.build-info" "$APK_VERSION-r$APK_RELEASE" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
+    raise SystemExit('Staged build metadata must be a regular file in the application directory')
+lines = [line for line in path.read_text().splitlines()
+         if not line.startswith(('apk_version=', 'apk_layout='))]
+lines.extend(('apk_version=' + sys.argv[2], 'apk_layout=native-merged-v1'))
+path.write_text('\n'.join(lines) + '\n')
+PY
   # Never embed the builder account's numeric UID/GID or dereference symlinks.
   python3 - "$stage" <<'PY'
 from pathlib import Path
@@ -508,6 +805,14 @@ PY
   dependency_list+=" vips>=$vips_version vips-cpp>=$vips_version vips-jxl>=$vips_version libraw>=$libraw_version"
   dependency_list+=' py3-opencv py3-onnxruntime py3-yaml py3-shapely'
   dependency_list+=' postgresql-client util-linux lcms2 mesa-gl geos curl'
+  # Retain external dependencies of the original libraries. Exact bundled
+  # names/versions and SONAME capabilities satisfy internal requirements.
+  dependency_list+=" $(tr '\n' ' ' < "$runtime_metadata/depends")"
+  runtime_provides="$(tr '\n' ' ' < "$runtime_metadata/provides")"
+  runtime_replaces="$(tr '\n' ' ' < "$runtime_metadata/replaces")"
+  package_license="$(cat "$runtime_metadata/license")"
+  [[ -z "$runtime_provides" ]] || metadata_args+=(--info "provides:$runtime_provides")
+  [[ -z "$runtime_replaces" ]] || metadata_args+=(--info "replaces:$runtime_replaces")
   if [[ -n "$APK_SIGNING_KEY" ]]; then
     signing_args=(--sign-key "$APK_SIGNING_KEY")
     mkdir "$PKG_WORK/keys"
@@ -528,20 +833,20 @@ PY
     --info "arch:$APK_ARCH" \
     --info "description:$APK_DESCRIPTION" \
     --info "url:$APK_URL" \
-    --info 'license:AGPL-3.0-only' \
+    --info "license:$package_license" \
     --info 'origin:immich' \
     --info "repo-commit:$source_sha" \
     --info "build-time:$(date -u +%s)" \
     --info "depends:$dependency_list" \
     --script "pre-install:$scripts/pre-install" \
     --script "post-install:$scripts/post-install" \
-    --script "pre-upgrade:$scripts/stop-services" \
-    --script "post-upgrade:$scripts/post-install" \
-    --script "pre-deinstall:$scripts/stop-services" \
+    --script "pre-upgrade:$scripts/pre-upgrade" \
+    --script "post-upgrade:$scripts/post-upgrade" \
+    --script "pre-deinstall:$scripts/pre-deinstall" \
     --script "post-deinstall:$scripts/post-deinstall" \
     --output "$PKG_WORK/$ASSET_NAME" "${metadata_args[@]}" "${signing_args[@]}"
   verify_apk "$PKG_WORK/$ASSET_NAME" "${verify_args[@]}"
-  # Runtime APKs are already inside the signed payload. Publish one APK only.
+  # Runtime files are already inside the signed payload. Publish one APK only.
   if [[ -n "$APK_SIGNING_KEY" ]]; then
     install -m 0644 "$PKG_WORK/keys/$ASSET_NAME.pub" "$ARTIFACT_DIR/$ASSET_NAME.pub"
   fi
@@ -557,6 +862,366 @@ PY
   log "Release asset: $ARTIFACT_DIR/$ASSET_NAME"
   log "Checksum: $ARTIFACT_DIR/$ASSET_NAME.sha256"
   [[ -z "$APK_SIGNING_KEY" ]] || log "Public key: $ARTIFACT_DIR/$ASSET_NAME.pub"
+}
+
+# Merge verified original runtime payloads into a single native Immich package.
+# Call before mkpkg and before final payload validation/ownership normalization.
+# Outputs provides, depends, replaces (one value per line) and license (one line).
+merge_runtime_apks() {
+  python3 - "$1" "$2" "$3" "$4" "$APK_ARCH" <<'PY'
+from pathlib import Path
+import functools, hashlib, json, os, posixpath, re, shutil, stat, subprocess, sys, tarfile, tempfile
+
+stage, archives, manifest, metadata = map(Path, sys.argv[1:5])
+arch = sys.argv[5]
+def fail(message):
+    raise SystemExit('Runtime merge: ' + message)
+def command(*args):
+    return subprocess.run(['apk', *map(str, args)], check=True, text=True, stdout=subprocess.PIPE).stdout
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+def allowed(path, directory=False):
+    if not isinstance(path, str) or not path or path.startswith('/') or '\\' in path:
+        return False
+    parts = path.split('/')
+    if any(p in ('', '.', '..') or any(ord(c) < 32 or ord(c) == 127 for c in p) for p in parts):
+        return False
+    if directory and path in ('usr', 'usr/lib', 'usr/share', 'usr/share/licenses'):
+        return True
+    if not (path.startswith('usr/lib/') or path.startswith('usr/share/licenses/')):
+        return False
+    if any(p in ('pkgconfig', 'cmake', '.cache', '.cargo', '.env', 'node_modules', 'home', 'backups') for p in parts):
+        return False
+    return not path.endswith(('.apk', '.a', '.la', '.tar', '.tar.gz'))
+def target_path(path, target):
+    if not isinstance(target, str) or not target or any(ord(c) < 32 or ord(c) == 127 for c in target):
+        fail('invalid runtime symlink target: ' + path)
+    resolved = posixpath.normpath(target.lstrip('/') if target.startswith('/') else posixpath.join(posixpath.dirname(path), target))
+    if not allowed(resolved):
+        fail('runtime symlink escapes the allowed library/license paths: ' + path)
+    return resolved
+def audit_header(path, kind, mode, target=None):
+    if not allowed(path, kind == 'directory'):
+        fail('unsupported runtime payload path: ' + path)
+    if kind not in ('directory', 'file', 'symlink') or mode & 0o7000:
+        fail('unsupported runtime file type or special permission bits: ' + path)
+    if kind == 'symlink':
+        target_path(path, target)
+def one(fields, name, required=True):
+    values = fields.get(name, [])
+    if len(values) != 1:
+        if not values and not required:
+            return ''
+        fail('missing or duplicate package field: ' + name)
+    value = values[0]
+    if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        fail('invalid package field: ' + name)
+    return value
+
+def read_metadata(path):
+    with path.open('rb') as stream:
+        magic = stream.read(4)
+    if magic.startswith(b'ADB'):
+        data = json.loads(command('adbdump', '--format', 'json', path))
+        info = data.get('info', {})
+        if any(data.get('scripts', {}).values()) or data.get('triggers'):
+            fail('cannot silently merge lifecycle scripts/triggers from ' + path.name)
+        for directory in data.get('paths', []):
+            dirname = directory['name']
+            acl = directory.get('acl', {})
+            if acl.get('user') != 'root' or acl.get('group') != 'root' or acl.get('xattrs'):
+                fail('non-root owner or extended attributes in ' + path.name)
+            audit_header(dirname, 'directory', acl['mode'])
+            for entry in directory.get('files', []):
+                filename = entry['name']
+                if '/' in filename:
+                    fail('invalid APKv3 file basename')
+                full = dirname + '/' + filename
+                acl = entry.get('acl', {})
+                if acl.get('user') != 'root' or acl.get('group') != 'root' or acl.get('xattrs'):
+                    fail('non-root owner or extended attributes in ' + path.name)
+                kind, target = 'file', None
+                if 'target' in entry:
+                    encoded = bytes.fromhex(entry['target'])
+                    if len(encoded) < 3 or int.from_bytes(encoded[:2], 'little') != stat.S_IFLNK:
+                        fail('unsupported APKv3 special file/hardlink: ' + full)
+                    kind, target = 'symlink', encoded[2:].decode('utf-8')
+                audit_header(full, kind, acl['mode'], target)
+        return {
+            'name': info['name'], 'version': info['version'], 'arch': info['arch'],
+            'license': [info['license']] if info.get('license') else [],
+            'depends': info.get('depends', []), 'provides': info.get('provides', []),
+            'replaces': info.get('replaces', []), 'url': info.get('url', ''),
+            'origin': info.get('origin', ''), 'maintainer': info.get('maintainer', ''),
+        }
+    if magic[:2] != b'\x1f\x8b':
+        fail('unsupported original APK format: ' + path.name)
+    fields = {}
+    found_info = False
+    # APKv2 consists of concatenated gzip/tar members. Parse only metadata and
+    # headers with Python's standard tar reader; native apk extracts payloads.
+    with tarfile.open(path, mode='r:gz', ignore_zeros=True) as archive:
+        for member in archive:
+            name = member.name.rstrip('/')
+            if name == '.PKGINFO':
+                if found_info or not member.isfile() or member.size > 1048576:
+                    fail('invalid or duplicate .PKGINFO: ' + path.name)
+                found_info = True
+                for line in archive.extractfile(member).read().decode('utf-8').splitlines():
+                    if not line or line.startswith('#'):
+                        continue
+                    key, separator, value = line.partition(' = ')
+                    if not separator:
+                        fail('invalid .PKGINFO line: ' + path.name)
+                    fields.setdefault(key, []).append(value)
+            elif name.startswith('.SIGN.') and '/' not in name:
+                if not member.isfile():
+                    fail('invalid signature control member')
+            elif name.startswith('.') and '/' not in name:
+                fail('cannot silently merge lifecycle/control member ' + name + ' from ' + path.name)
+            else:
+                if member.uid != 0 or member.gid != 0 or any('xattr' in key for key in member.pax_headers):
+                    fail('non-root owner or extended attributes in ' + name)
+                kind = 'directory' if member.isdir() else 'file' if member.isfile() else 'symlink' if member.issym() else 'special'
+                audit_header(name, kind, member.mode, member.linkname if member.issym() else None)
+    if fields.get('triggers') or fields.get('trigger'):
+        fail('cannot silently merge triggers from ' + path.name)
+    return {
+        'name': one(fields, 'pkgname'), 'version': one(fields, 'pkgver'),
+        'arch': one(fields, 'arch'), 'license': fields.get('license', []),
+        'depends': fields.get('depend', []), 'provides': fields.get('provides', []),
+        'replaces': fields.get('replaces', []), 'url': one(fields, 'url', False),
+        'origin': one(fields, 'origin', False), 'maintainer': one(fields, 'maintainer', False),
+    }
+
+if stage.is_symlink() or not stage.is_dir() or archives.is_symlink() or not archives.is_dir():
+    fail('stage and original APK directory must be regular directories')
+metadata.mkdir(mode=0o700, parents=True, exist_ok=True)
+if metadata.is_symlink():
+    fail('metadata output must be a regular directory')
+entries = {}
+for line in manifest.read_text().splitlines():
+    match = re.fullmatch(r'([0-9a-f]{64})  ([a-z0-9][a-z0-9+_.-]*-[0-9][0-9a-z._]*-r[0-9]+\.(?:x86_64|aarch64)\.apk)', line)
+    if not match or '..' in match[2] or match[2] in entries:
+        fail('invalid or duplicate original APK manifest entry')
+    entries[match[2]] = match[1]
+if set(p.name for p in archives.iterdir()) != set(entries):
+    fail('original APK directory does not exactly match its manifest')
+
+packages, payloads, all_files = [], [], {}
+with tempfile.TemporaryDirectory(prefix='runtime-merge-', dir=metadata) as temporary:
+    for filename, expected in sorted(entries.items()):
+        original = archives / filename
+        if original.is_symlink() or not original.is_file() or digest(original) != expected:
+            fail('original APK checksum mismatch or invalid file: ' + filename)
+        command('verify', original)
+        package = read_metadata(original)
+        name, version = package['name'], package['version']
+        if not re.fullmatch(r'[a-z0-9][a-z0-9+_.-]*', name) or not re.fullmatch(r'[0-9][0-9a-z._]*-r[0-9]+', version):
+            fail('invalid original package name/version')
+        if name == 'immich' or any(name == p or name.startswith(p + '-') for p in ('musl', 'apk-tools', 'alpine-baselayout', 'busybox')):
+            fail('refusing to merge core/application package: ' + name)
+        if package['arch'] not in (arch, 'noarch') or filename != name + '-' + version + '.' + arch + '.apk':
+            fail('original package filename/architecture does not match its metadata')
+        if not package['license'] or any(not isinstance(v, str) or not v or any(ord(c) < 32 for c in v) for v in package['license']):
+            fail('missing or invalid original license: ' + name)
+        if any(p['name'] == name for p in packages):
+            fail('duplicate original package name: ' + name)
+        package['sha256'] = expected
+        package['files'] = []
+        root = Path(temporary, name)
+        root.mkdir()
+        command('extract', '--destination', root, original)
+        for directory, subdirs, filenames in os.walk(root, followlinks=False):
+            for basename in sorted(subdirs + filenames):
+                path = Path(directory, basename)
+                relative = path.relative_to(root).as_posix()
+                details = path.lstat()
+                kind = 'symlink' if stat.S_ISLNK(details.st_mode) else 'directory' if stat.S_ISDIR(details.st_mode) else 'file' if stat.S_ISREG(details.st_mode) else 'special'
+                target = os.readlink(path) if kind == 'symlink' else None
+                audit_header(relative, kind, stat.S_IMODE(details.st_mode), target)
+                record = {'path': relative, 'type': kind, 'mode': 0o777 if kind == 'symlink' else 0o755 if kind == 'directory' or details.st_mode & 0o111 else 0o644}
+                if kind == 'file': record['sha256'] = digest(path)
+                if kind == 'symlink': record['target'] = target
+                package['files'].append(relative)
+                if relative in all_files:
+                    if kind != 'directory' or all_files[relative]['type'] != 'directory':
+                        fail('duplicate runtime file path: ' + relative)
+                else:
+                    all_files[relative] = record
+                    payloads.append((path, record))
+        packages.append(package)
+
+    # Every claimed soname comes from original metadata and an actual merged
+    # file. All runtime symlinks must resolve within the selected payload.
+    for record in all_files.values():
+        if record['type'] != 'symlink': continue
+        target = target_path(record['path'], record['target'])
+        visited = {record['path']}
+        while True:
+            if target in visited or target not in all_files:
+                fail('dangling or circular merged runtime symlink: ' + record['path'])
+            visited.add(target)
+            linked = all_files[target]
+            if linked['type'] != 'symlink': break
+            target = target_path(target, linked['target'])
+        if linked['type'] != 'file':
+            fail('runtime symlink must resolve to a regular library/license file')
+
+    providers = {}
+    dependency_re = re.compile(r'(!?)([A-Za-z0-9][A-Za-z0-9+_.:-]*)([<>=~]*)([^\s]*)')
+    def dependency(value):
+        match = dependency_re.fullmatch(value)
+        if not match or bool(match[3]) != bool(match[4]):
+            fail('unsupported original dependency/provide: ' + repr(value))
+        return match.groups()
+    for package in packages:
+        for value in [package['name'] + '=' + package['version'], *package['provides']]:
+            conflict, name, operator, version = dependency(value)
+            if conflict or operator not in ('', '=') or name == 'immich':
+                fail('unsupported original provides: ' + value)
+            if name in providers and providers[name] != version:
+                fail('conflicting versions of merged provide: ' + name)
+            providers[name] = version
+            if name.startswith('so:') and not any(Path(p).name == name[3:] and f['type'] in ('file', 'symlink') for p, f in all_files.items()):
+                fail('provided SONAME has no merged runtime file: ' + name)
+    @functools.lru_cache(None)
+    def comparison(left, right):
+        result = command('version', '--test', left, right).strip()
+        if result not in ('<', '=', '>'): fail('invalid native version comparison')
+        return result
+    depends = set()
+    for package in packages:
+        for value in package['depends']:
+            negative, name, operator, version = dependency(value)
+            if name not in providers:
+                depends.add(value)
+                continue
+            if operator and operator not in ('=', '<', '>', '<=', '>='):
+                fail('unsupported internal runtime version constraint: ' + value)
+            provided = providers[name]
+            satisfied = not operator or bool(provided) and comparison(provided, version) in operator
+            if negative:
+                if satisfied: fail('merged runtime conflicts with itself: ' + value)
+            elif not satisfied:
+                fail('merged runtime does not satisfy its original dependency: ' + value)
+    names = {p['name'] for p in packages}
+    for package in packages:
+        if any(dependency(value)[1] not in names for value in package['replaces']):
+            fail('original package replaces an unselected package: ' + package['name'])
+    provides = sorted(name + ('=' + version if version else '') for name, version in providers.items())
+    licenses = sorted({value for p in packages for value in p['license']})
+    license_expression = 'AGPL-3.0-only' + ''.join(' AND (' + value + ')' for value in licenses)
+
+    # Refuse every file collision and symlinked destination ancestor. Directory
+    # sharing is allowed; source links are copied as links, never dereferenced.
+    for source, record in sorted(payloads, key=lambda item: (item[1]['path'].count('/'), item[1]['path'])):
+        destination = stage / record['path']
+        for parent in list(destination.parents)[:len(Path(record['path']).parts)]:
+            if parent.is_symlink() or not parent.is_dir():
+                fail('non-directory/symlinked staging ancestor: ' + str(parent))
+        if record['type'] == 'directory':
+            if os.path.lexists(destination) and (destination.is_symlink() or not destination.is_dir()):
+                fail('runtime directory collides with staged file: ' + record['path'])
+            destination.mkdir(exist_ok=True)
+        else:
+            if os.path.lexists(destination):
+                fail('runtime file collides with existing payload: ' + record['path'])
+            if record['type'] == 'symlink':
+                destination.symlink_to(record['target'])
+            else:
+                shutil.copyfile(source, destination, follow_symlinks=False)
+        os.chown(destination, 0, 0, follow_symlinks=False)
+        if record['type'] != 'symlink': os.chmod(destination, record['mode'])
+
+metadata_values = {'provides': provides, 'depends': sorted(depends), 'replaces': sorted(names), 'license': [license_expression]}
+for filename, values in metadata_values.items():
+    destination = metadata / filename
+    if os.path.lexists(destination): fail('metadata output already exists: ' + filename)
+    destination.write_text(''.join(value + '\n' for value in values))
+audit = {'schema': 1, 'packages': packages, 'files': [all_files[p] for p in sorted(all_files)], **{k:v for k,v in metadata_values.items() if k != 'license'}, 'license': license_expression}
+audit_dir = stage / 'usr/share/immich'
+for parent in (stage / 'usr', stage / 'usr/share', audit_dir):
+    if os.path.lexists(parent) and (parent.is_symlink() or not parent.is_dir()):
+        fail('invalid audit-manifest directory')
+    parent.mkdir(exist_ok=True)
+audit_file = audit_dir / 'bundled-runtime.json'
+if os.path.lexists(audit_file): fail('audit manifest already exists')
+audit_file.write_text(json.dumps(audit, indent=2, sort_keys=True) + '\n')
+os.chmod(audit_file, 0o644)
+PY
+}
+
+# Validate the signed audit manifest against actual runtime files, then emit
+# their exact paths for validate_payload's allowlist (one path per line).
+validate_bundled_runtime() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import hashlib, json, os, posixpath, re, stat, sys
+root = Path(sys.argv[1])
+def fail(message): raise SystemExit('Invalid bundled runtime: ' + message)
+def allowed(path, directory=False):
+    if not isinstance(path, str) or not path or path.startswith('/') or '\\' in path: return False
+    parts = path.split('/')
+    if any(p in ('', '.', '..') or any(ord(c) < 32 or ord(c) == 127 for c in p) for p in parts): return False
+    if directory and path in ('usr', 'usr/lib', 'usr/share', 'usr/share/licenses'): return True
+    if not (path.startswith('usr/lib/') or path.startswith('usr/share/licenses/')): return False
+    if any(p in ('pkgconfig', 'cmake', '.cache', '.cargo', '.env', 'node_modules', 'home', 'backups') for p in parts): return False
+    return not path.endswith(('.apk', '.a', '.la', '.tar', '.tar.gz'))
+manifest = root / 'usr/share/immich/bundled-runtime.json'
+for relative in ('usr', 'usr/share', 'usr/share/immich'):
+    if (root / relative).is_symlink() or not (root / relative).is_dir(): fail('invalid audit-manifest parent')
+if manifest.is_symlink() or not manifest.is_file(): fail('missing regular audit manifest')
+data = json.loads(manifest.read_text())
+if data.get('schema') != 1 or not isinstance(data.get('packages'), list) or not isinstance(data.get('files'), list): fail('unsupported audit schema')
+records = {}
+for item in data['files']:
+    path, kind = item['path'], item['type']
+    if not allowed(path, kind == 'directory') or path in records: fail('unsafe or duplicate path: ' + path)
+    if kind not in ('file', 'directory', 'symlink'): fail('unsupported runtime file type')
+    records[path] = item
+    file = root / path
+    for parent in list(file.parents)[:len(Path(path).parts)]:
+        if parent.is_symlink() or not parent.is_dir(): fail('symlinked or missing parent: ' + path)
+    if not os.path.lexists(file): fail('missing runtime file: ' + path)
+    details = file.lstat()
+    expected_mode = item['mode']
+    if details.st_uid != 0 or details.st_gid != 0: fail('non-root runtime owner: ' + path)
+    if kind == 'directory':
+        valid = stat.S_ISDIR(details.st_mode) and expected_mode == 0o755
+    elif kind == 'file':
+        valid = stat.S_ISREG(details.st_mode) and expected_mode in (0o644, 0o755)
+        expected = item.get('sha256', '')
+        if not re.fullmatch('[0-9a-f]{64}', expected): fail('invalid runtime digest')
+        if valid:
+            with file.open('rb') as stream:
+                valid = hashlib.file_digest(stream, 'sha256').hexdigest() == expected
+    else:
+        valid = stat.S_ISLNK(details.st_mode) and expected_mode == 0o777 and os.readlink(file) == item.get('target')
+    if not valid or stat.S_IMODE(details.st_mode) != expected_mode: fail('runtime type/mode/content mismatch: ' + path)
+for path, item in records.items():
+    if item['type'] != 'symlink': continue
+    seen = {path}
+    current = path
+    while records[current]['type'] == 'symlink':
+        target = records[current]['target']
+        if not isinstance(target, str) or not target or any(ord(c) < 32 or ord(c) == 127 for c in target): fail('invalid symlink target')
+        current = posixpath.normpath(target.lstrip('/') if target.startswith('/') else posixpath.join(posixpath.dirname(current), target))
+        if not allowed(current) or current in seen or current not in records: fail('escaping/dangling runtime symlink: ' + path)
+        seen.add(current)
+    if records[current]['type'] != 'file': fail('runtime symlink does not resolve to a file')
+package_names = set()
+for package in data['packages']:
+    name = package.get('name', '')
+    if not re.fullmatch('[a-z0-9][a-z0-9+_.-]*', name) or name in package_names: fail('invalid/duplicate source package')
+    package_names.add(name)
+    if not re.fullmatch('[0-9a-f]{64}', package.get('sha256', '')) or not package.get('license'): fail('missing source provenance')
+    if any(path not in records for path in package.get('files', [])): fail('source file is absent from runtime allowlist')
+if set(path for package in data['packages'] for path in package.get('files', [])) != set(records): fail('runtime file has no original source package')
+for path in sorted(records): print(path)
+print('usr/share/immich/bundled-runtime.json')
+PY
 }
 
 MODE=build
@@ -1030,7 +1695,7 @@ $RUNTIME_APK_VERSIONS
 binaryen=$BINARYEN_VERSION
 built_at=$BUILT_AT
 EOF
-
+# Complete means application paths validated, NOT that services were run.
 printf '%s\n' "$BUILT_AT" > "$APP/.build-complete"
 
 SUCCESS=1
