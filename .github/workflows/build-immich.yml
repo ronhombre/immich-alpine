@@ -188,7 +188,7 @@ jobs:
             x86_64|aarch64) ;;
             *) echo "ERROR: Unsupported artifact architecture: $arch" >&2; exit 1 ;;
           esac
-          asset="immich-alpine-3.24-${arch}.apk"
+          asset="immich-alpine-${APK_VERSION}-r${APK_RELEASE}.apk"
           for file in "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256"; do
             [[ -f "$file" && ! -L "$file" && -s "$file" ]]
           done
