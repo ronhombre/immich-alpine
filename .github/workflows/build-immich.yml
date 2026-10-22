@@ -1,19 +1,46 @@
-name: Build Immich for Alpine 3.24
+name: Build Immich APK for Alpine 3.24
 
 on:
   release:
-    types: [ published ]
+    types: [published]
   workflow_dispatch:
     inputs:
       immich_rev:
-        description: 'Immich Version (tag, branch, or commit)'
+        description: 'Upstream Immich tag, branch, or commit'
         required: true
         default: 'v3.2.0'
       release_tag:
-        description: 'Release tag to attach the artifact to (optional)'
+        description: 'Release tag to attach the APK to (optional)'
+        required: false
+        default: ''
+      apk_version:
+        description: 'Alpine package version; required for branch/commit builds'
+        required: false
+        default: ''
+      apk_release:
+        description: 'Alpine package revision (0, 1, 2, ...)'
+        required: false
+        default: '0'
+      apk_maintainer:
+        description: 'Package maintainer, e.g. Your Name <you@example.com> (public metadata)'
+        required: false
+        default: 'Ron Lauren Hombre <ronlauren@hombre.asia>'
+      bundle_runtime:
+        description: 'Include the additional runtime APKs required from Edge'
+        type: boolean
+        required: false
+        default: true
+      extism_tag:
+        description: 'Pinned Extism JS tag (blank resolves latest)'
         required: false
         default: ''
 
+# Optional repository secret: APK_SIGNING_KEY contains an unencrypted PEM
+# private key. Only its public half is published with the APK.
+# Optional repository variable: APK_MAINTAINER supplies the public maintainer
+# field; the manual apk_maintainer input overrides it for one build.
+# APK_DESCRIPTION and APK_URL repository variables may customize those public
+# metadata fields. When empty, the builder uses its Immich defaults.
 permissions:
   contents: write
 
@@ -23,94 +50,193 @@ jobs:
     container:
       image: alpine:3.24
       options: --user root
+    defaults:
+      run:
+        shell: bash
+    env:
+      ARTIFACT_DIR: /tmp/immich-alpine-dist
 
     steps:
+      - name: Bootstrap Bash and checkout dependencies
+        shell: sh
+        run: |
+          set -eu
+          apk add --no-cache bash git gcompat libc6-compat
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Determine Immich revision
         id: rev
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_IMMICH_REV: ${{ inputs.immich_rev }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            echo "immich_rev=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-            echo "release_tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == release ]]; then
+            immich_rev="$EVENT_RELEASE_TAG"
+            release_tag="$EVENT_RELEASE_TAG"
           else
-            echo "immich_rev=${{ github.event.inputs.immich_rev }}" >> "$GITHUB_OUTPUT"
-            echo "release_tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            immich_rev="$INPUT_IMMICH_REV"
+            release_tag="$INPUT_RELEASE_TAG"
           fi
+          [[ "$immich_rev" =~ ^[A-Za-z0-9][A-Za-z0-9._/+\-]*$ && "$immich_rev" != *..* ]] || {
+            echo 'ERROR: Invalid upstream Immich revision.' >&2
+            exit 1
+          }
+          [[ -z "$release_tag" || "$release_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || {
+            echo 'ERROR: Invalid GitHub release tag.' >&2
+            exit 1
+          }
+          printf 'immich_rev=%s\nrelease_tag=%s\n' "$immich_rev" "$release_tag" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         run: |
-          # Pin to the stable repository for core tools, but pull vips-dev from Edge.
-          apk update
+          set -Eeuo pipefail
+          # Install the common toolchain and runtime libraries from Alpine 3.24.
           apk add --no-cache \
-          bash sed curl gcompat libc6-compat \
-          nodejs npm pnpm python3 python3-dev py3-pip uv \
-          ffmpeg7 \
-          build-base \
-          git wget unzip jq util-linux \
-          perl perl-net-ssleay perl-io-socket-ssl \
-          perl-capture-tiny perl-file-which perl-file-chdir \
-          perl-extutils-pkgconfig perl-ffi-checklib \
-          perl-test-warnings perl-test-fatal perl-test-needs \
-          perl-test2-suite perl-sort-versions perl-path-tiny \
-          perl-try-tiny perl-term-table \
-          perl-mojolicious perl-file-slurper \
-          lcms2 mesa-gl file binutils \
-          py3-opencv py3-onnxruntime \
-          py3-numpy-dev geos-dev py3-shapely \
-          protobuf-dev py3-nanobind py3-yaml
-          
-          # Install the latest vips-dev from Edge to satisfy Sharp's version requirement
-          apk add --no-cache --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
-          vips-dev libraw-dev
+            apk-tools openssl sed curl \
+            nodejs npm pnpm python3 python3-dev py3-pip uv \
+            ffmpeg7 build-base git wget unzip jq util-linux openrc postgresql-client \
+            perl perl-compress-raw-zlib perl-compress-raw-bzip2 \
+            perl-net-ssleay perl-io-socket-ssl \
+            perl-capture-tiny perl-file-which perl-file-chdir \
+            perl-extutils-pkgconfig perl-ffi-checklib \
+            perl-test-warnings perl-test-fatal perl-test-needs \
+            perl-test2-suite perl-sort-versions perl-path-tiny \
+            perl-try-tiny perl-term-table perl-mojolicious perl-file-slurper \
+            abseil-cpp abseil-cpp-flags-marshalling \
+            lcms2 mesa-gl geos file binutils \
+            vips vips-cpp vips-jxl vips-dev libraw libraw-dev \
+            py3-opencv py3-onnxruntime py3-numpy-dev geos-dev py3-shapely \
+            protobuf-dev py3-nanobind py3-yaml
 
-      - name: Create immich user and directories
-        run: |
-          apk add --no-cache shadow
-          useradd -r -d /var/lib/immich/home -s /sbin/nologin -M immich
-          mkdir -p /var/lib/immich/home
-          mkdir -p /var/log/immich
-          chown -R immich:immich /var/lib/immich /var/log/immich
-          chmod 700 /var/lib/immich
-          if ! id immich &>/dev/null; then
-            echo "CRITICAL: Failed to create the 'immich' user."
-            exit 1
-          fi
-          echo "User 'immich' created successfully (home: $(getent passwd immich | cut -d: -f6))"
+          # Immich v3.2.0 uses Sharp 0.35.3, which needs libvips >=8.18.3;
+          # Alpine 3.24 currently provides 8.18.2. Retain the original builder's
+          # Edge override and keep the related vips packages aligned. By default
+          # the builder also publishes the minimal required Edge runtime APKs;
+          # targets install those local companions without enabling Edge. When
+          # bundling is disabled, provide compatible runtime libraries yourself.
+          apk add --upgrade --no-cache \
+            --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
+            vips vips-cpp vips-dev vips-jxl libraw libraw-dev
 
-      - name: Verify HOME for immich user
-        run: |
-          su -s /bin/bash immich -c 'echo "HOME=$HOME"'
-          su -s /bin/bash immich -c 'echo "PWD=$(pwd)"'
-
-      - name: Build Immich
+      - name: Build and optionally sign APK
+        id: build
         env:
           IMMICH_REV: ${{ steps.rev.outputs.immich_rev }}
+          IMMICH_ALPINE_RELEASE: ${{ steps.rev.outputs.release_tag }}
+          APK_VERSION: ${{ inputs.apk_version }}
+          APK_RELEASE: ${{ inputs.apk_release || '0' }}
+          APK_MAINTAINER: ${{ inputs.apk_maintainer || vars.APK_MAINTAINER }}
+          APK_DESCRIPTION: ${{ vars.APK_DESCRIPTION }}
+          APK_URL: ${{ vars.APK_URL }}
+          # Release-triggered builds default to bundling. A manual false must
+          # become 0 rather than be replaced by a truthy fallback expression.
+          APK_BUNDLE_RUNTIME: ${{ github.event_name == 'workflow_dispatch' && inputs.bundle_runtime == false && '0' || '1' }}
+          EXTISM_JS_TAG: ${{ inputs.extism_tag }}
+          APK_SIGNING_KEY_PEM: ${{ secrets.APK_SIGNING_KEY }}
         run: |
-          chmod +x build-immich-alpine.sh
-          ./build-immich-alpine.sh
+          set -Eeuo pipefail
+          set +x
+          signing_dir=''
+          signing_args=()
+          cleanup_signing() {
+            [[ -z "$signing_dir" ]] || rm -rf -- "$signing_dir"
+          }
+          trap cleanup_signing EXIT
+          if [[ -n "$APK_SIGNING_KEY_PEM" ]]; then
+            signing_dir="$(mktemp -d /tmp/immich-apk-signing.XXXXXXXX)"
+            printf 'signing_dir=%s\n' "$signing_dir" >> "$GITHUB_OUTPUT"
+            (umask 077; printf '%s\n' "$APK_SIGNING_KEY_PEM" > "$signing_dir/immich.rsa")
+            signing_args=(--signing-key "$signing_dir/immich.rsa")
+          fi
+          # The root builder reads the file only while packaging. Do not pass
+          # the secret value to upstream source/dependency build processes.
+          unset APK_SIGNING_KEY_PEM
+          bash ./build-immich-alpine.sh "${signing_args[@]}"
 
-      - name: Package artifact
+          arch="$(apk --print-arch)"
+          case "$arch" in
+            x86_64|aarch64) ;;
+            *) echo "ERROR: Unsupported artifact architecture: $arch" >&2; exit 1 ;;
+          esac
+          asset="immich-alpine-3.24-${arch}.apk"
+          manifest="$ARTIFACT_DIR/$asset.runtime-apks.sha256"
+          for file in "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256"; do
+            [[ -f "$file" && ! -L "$file" && -s "$file" ]]
+          done
+          # Empty manifests are valid when no additional runtime APK is needed.
+          [[ -f "$manifest" && ! -L "$manifest" ]]
+          (cd "$ARTIFACT_DIR" && sha256sum -c "$asset.sha256")
+          output_files=("$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256")
+          if (( ${#signing_args[@]} )); then
+            [[ -f "$ARTIFACT_DIR/$asset.pub" && ! -L "$ARTIFACT_DIR/$asset.pub" && -s "$ARTIFACT_DIR/$asset.pub" ]]
+            output_files+=("$ARTIFACT_DIR/$asset.pub")
+          fi
+          output_files+=("$manifest")
+
+          declare -A runtime_seen=()
+          runtime_line_pattern="^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+-]*\.${arch}\.apk)$"
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ $runtime_line_pattern ]] || {
+              echo 'ERROR: Invalid runtime APK checksum manifest entry.' >&2
+              exit 1
+            }
+            checksum="${BASH_REMATCH[1]}"
+            runtime_asset="${BASH_REMATCH[2]}"
+            [[ "$runtime_asset" != *..* && -z "${runtime_seen[$runtime_asset]+present}" ]] || {
+              echo 'ERROR: Unsafe or duplicate runtime APK filename.' >&2
+              exit 1
+            }
+            runtime_seen["$runtime_asset"]=1
+            runtime_path="$ARTIFACT_DIR/runtime-apks/$runtime_asset"
+            [[ -d "$ARTIFACT_DIR/runtime-apks" && ! -L "$ARTIFACT_DIR/runtime-apks" ]]
+            [[ -f "$runtime_path" && ! -L "$runtime_path" && -s "$runtime_path" ]]
+            actual_checksum="$(sha256sum "$runtime_path")"
+            [[ "${actual_checksum%% *}" == "$checksum" ]] || {
+              echo "ERROR: Runtime APK checksum mismatch: $runtime_asset" >&2
+              exit 1
+            }
+            output_files+=("$runtime_path")
+          done < "$manifest"
+
+          # Upload only checked, explicitly named public files. Unlisted files
+          # in runtime-apks/ and all build/private-key directories stay excluded.
+          {
+            printf 'arch=%s\nfiles<<IMMICH_APK_FILES\n' "$arch"
+            printf '%s\n' "${output_files[@]}"
+            printf 'IMMICH_APK_FILES\n'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Remove temporary signing key
+        if: always()
+        env:
+          SIGNING_DIR: ${{ steps.build.outputs.signing_dir }}
         run: |
-          cd /
-          tar -czf /tmp/immich-alpine-3.24.tar.gz \
-            var/lib/immich \
-            var/log/immich
+          if [[ "$SIGNING_DIR" == /tmp/immich-apk-signing.* ]]; then
+            rm -rf -- "$SIGNING_DIR"
+          fi
 
-      - name: Upload artifact to GitHub Release
+      - name: Upload APK to GitHub Release
         if: steps.rev.outputs.release_tag != ''
         uses: softprops/action-gh-release@v3
         with:
-          files: /tmp/immich-alpine-3.24.tar.gz
+          files: ${{ steps.build.outputs.files }}
+          fail_on_unmatched_files: true
           tag_name: ${{ steps.rev.outputs.release_tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload artifact as workflow artifact (manual runs without a release)
+      - name: Upload APK as workflow artifact
         if: steps.rev.outputs.release_tag == ''
         uses: actions/upload-artifact@v4
         with:
-          name: immich-alpine-3.24
-          path: /tmp/immich-alpine-3.24.tar.gz
+          name: immich-alpine-3.24-${{ steps.build.outputs.arch }}
+          path: ${{ steps.build.outputs.files }}
+          if-no-files-found: error
           retention-days: 30

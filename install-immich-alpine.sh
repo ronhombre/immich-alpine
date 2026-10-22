@@ -2,11 +2,48 @@
 set -Eeuo pipefail
 umask 077
 
-# Usage: install-immich-alpine.sh [release-tag|latest] [owner/repo]
+# Usage: install-immich-alpine.sh [--allow-untrusted] [--repository URL] [release-tag|latest] [owner/repo]
 # No release argument means the latest published stable GitHub release.
-RELEASE_TAG="${1:-latest}"
-GITHUB_REPO="${2:-ronhombre/immich-alpine}"
-ASSET_NAME="immich-alpine-3.24.tar.gz"
+ALLOW_UNTRUSTED="${IMMICH_ALLOW_UNTRUSTED:-0}"
+APK_REPOSITORY_ARGS=()
+add_runtime_repository() {
+    [[ -n "$1" && "$1" != -* && "$1" != *$'\n'* && "$1" != *$'\r'* ]] || {
+        echo 'ERROR: --repository requires a nonempty repository URL that does not start with a dash.' >&2
+        exit 1
+    }
+    APK_REPOSITORY_ARGS+=(--repository "$1")
+}
+if [[ -n "${IMMICH_APK_REPOSITORY:-}" ]]; then
+    add_runtime_repository "$IMMICH_APK_REPOSITORY"
+fi
+positionals=()
+while (( $# )); do
+    case "$1" in
+        --help|-h)
+            printf 'Usage: %s [--allow-untrusted] [--repository URL] [release-tag|latest] [owner/repo]\n' "$0"
+            printf 'Installs the native Alpine 3.24 package for this machine.\n'
+            printf 'Default: latest stable release from ronhombre/immich-alpine.\n'
+            printf 'Trust the publisher public key in /etc/apk/keys before installing.\n'
+            printf 'Unsigned packages require --allow-untrusted or IMMICH_ALLOW_UNTRUSTED=1.\n'
+            printf 'Bundled runtime APKs are authenticated by the main package manifest and Alpine signatures.\n'
+            printf '%s\n' '--repository is repeatable and adds repositories only for this package transaction.'
+            printf 'IMMICH_APK_REPOSITORY supplies one additional runtime repository.\n'
+            printf 'For an older build or one made without bundled Edge runtime libraries:\n'
+            printf '  %s --repository https://dl-cdn.alpinelinux.org/alpine/edge/community\n' "$0"
+            exit 0 ;;
+        --allow-untrusted) ALLOW_UNTRUSTED=1 ;;
+        --repository)
+            (( $# >= 2 )) || { echo 'ERROR: --repository requires a URL.' >&2; exit 1; }
+            add_runtime_repository "$2"
+            shift ;;
+        --*) printf 'ERROR: Unknown option: %s\n' "$1" >&2; exit 1 ;;
+        *) positionals+=("$1") ;;
+    esac
+    shift
+done
+(( ${#positionals[@]} <= 2 )) || { echo 'ERROR: Expected at most a release tag and owner/repo.' >&2; exit 1; }
+RELEASE_TAG="${positionals[0]:-latest}"
+GITHUB_REPO="${positionals[1]:-ronhombre/immich-alpine}"
 IMMICH_PATH="/var/lib/immich"
 IMMICH_LOG_PATH="/var/log/immich"
 VERSION_FILE="$IMMICH_PATH/.immich-version"
@@ -15,19 +52,33 @@ PENDING_FILE="$IMMICH_PATH/.upgrade-pending"
 HEALTH_URL="${IMMICH_HEALTH_URL:-http://127.0.0.1:2283/api/server/ping}"
 HEALTH_RETRIES="${IMMICH_HEALTH_RETRIES:-30}"
 
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-    printf 'Usage: %s [release-tag|latest] [owner/repo]\n' "$0"
-    printf 'Without arguments, installs the latest stable ronhombre/immich-alpine release.\n'
-    exit 0
-fi
-(( $# <= 2 )) || { echo "Usage: $0 [release-tag|latest] [owner/repo]" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || { echo 'ERROR: Run as root.' >&2; exit 1; }
+[[ -f /etc/alpine-release ]] || { echo 'ERROR: This installer requires Alpine Linux 3.24.' >&2; exit 1; }
+read -r alpine_version < /etc/alpine-release
+[[ "$alpine_version" == 3.24.* ]] || { echo "ERROR: Expected Alpine 3.24, found $alpine_version." >&2; exit 1; }
+command -v apk >/dev/null || { echo 'ERROR: apk is required.' >&2; exit 1; }
+[[ "$(apk --version)" == 'apk-tools 3.'* ]] || {
+    echo 'ERROR: This APKv3 installer requires apk-tools 3.x.' >&2; exit 1;
+}
+APK_ARCH="$(apk --print-arch)"
+case "$APK_ARCH" in
+    x86_64|aarch64) ;;
+    *) echo "ERROR: Unsupported package architecture: $APK_ARCH" >&2; exit 1 ;;
+esac
+ASSET_NAME="immich-alpine-3.24-${APK_ARCH}.apk"
+[[ "$ALLOW_UNTRUSTED" == 0 || "$ALLOW_UNTRUSTED" == 1 ]] || {
+    echo 'ERROR: IMMICH_ALLOW_UNTRUSTED must be 0 or 1.' >&2; exit 1;
+}
+APK_TRUST_ARGS=()
+if [[ "$ALLOW_UNTRUSTED" == 1 ]]; then
+    APK_TRUST_ARGS+=(--allow-untrusted)
+    echo 'WARNING: Package signature trust checking is explicitly disabled for this installation.' >&2
+fi
 [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || { echo 'ERROR: Unsafe release tag.' >&2; exit 1; }
 [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'ERROR: Expected owner/repo.' >&2; exit 1; }
 [[ "$HEALTH_RETRIES" =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: HEALTH_RETRIES must be positive.' >&2; exit 1; }
 
 TMP_DIR=""
-NEXT_APP=""
 BACKUP_DIR=""
 ATTEMPT_ACTIVE=0
 UPGRADE_COMPLETE=0
@@ -47,7 +98,6 @@ cleanup() {
         echo "ERROR: Upgrade to $RELEASE_TAG failed. The completed backup was kept at: $BACKUP_DIR" >&2
         echo "ERROR: Pending-upgrade state was kept so the next attempt can reuse it." >&2
     fi
-    [[ -z "$NEXT_APP" ]] || rm -rf -- "$NEXT_APP"
     [[ -z "$TMP_DIR" ]] || rm -rf -- "$TMP_DIR"
     exit "$status"
 }
@@ -87,15 +137,8 @@ prune_backups() {
     done
 }
 
-# --- Install runtime dependencies ---
-echo 'Installing runtime dependencies...'
-apk update
-apk add --no-cache \
-    perl perl-compress-raw-zlib perl-compress-raw-bzip2 \
-    nodejs ffmpeg7 abseil-cpp abseil-cpp-flags-marshalling \
-    vips vips-cpp vips-jxl libraw \
-    python3 py3-opencv py3-onnxruntime py3-yaml py3-shapely \
-    postgresql-client util-linux lcms2 mesa-gl geos bash curl
+# The package declares application dependencies. Bootstrap only installer tools.
+apk add --no-cache bash curl util-linux
 
 # Resolve latest via GitHub's stable-release redirect, not the rate-limited API.
 # Resolve before touching services; a lookup failure leaves Immich running.
@@ -136,9 +179,20 @@ chmod 700 "$IMMICH_PATH"
 
 IS_UPGRADE=0
 [[ -d "$IMMICH_PATH/app" ]] && IS_UPGRADE=1
+APK_MANAGED=0
+apk info --installed immich >/dev/null 2>&1 && APK_MANAGED=1
 SOURCE_VERSION=""
 if [[ -f "$VERSION_FILE" ]]; then
     IFS= read -r SOURCE_VERSION < "$VERSION_FILE" || [[ -n "$SOURCE_VERSION" ]]
+fi
+# Direct `apk add` installations have no GitHub release marker yet. Use their
+# actual installed package version as the backup label instead of guessing a tag.
+if (( APK_MANAGED )) && [[ -z "$SOURCE_VERSION" ]]; then
+    installed_version="$(apk query --installed --fields version immich | sed -n 's/^Version: //p')"
+    [[ "$installed_version" =~ ^[0-9][0-9a-z._]*-r[0-9]+$ ]] || {
+        echo 'ERROR: Could not identify the installed Immich package version.' >&2; exit 1;
+    }
+    SOURCE_VERSION="apk-${installed_version}"
 fi
 if (( IS_UPGRADE )) && [[ -z "$SOURCE_VERSION" && ! -f "$PENDING_FILE" ]]; then
     echo "ERROR: Existing app has no $VERSION_FILE; cannot safely deduplicate backups." >&2
@@ -184,28 +238,134 @@ fi
 
 # An already committed version needs no upgrade. This is deliberately not a
 # repair mode: treating it as an upgrade could prune the previous backup.
-if (( IS_UPGRADE )) && [[ -z "$BACKUP_DIR" && "$SOURCE_VERSION" == "$RELEASE_TAG" ]]; then
+if (( IS_UPGRADE && APK_MANAGED )) && [[ -z "$BACKUP_DIR" && "$SOURCE_VERSION" == "$RELEASE_TAG" ]]; then
     echo "$RELEASE_TAG is already recorded as installed; no changes made."
     exit 0
 fi
 
 # --- Fetch and validate release BEFORE stopping the running services ---
 TMP_DIR=$(mktemp -d)
-mkdir -p "$TMP_DIR/staging"
+mkdir -p "$TMP_DIR/cache"
 ASSET_URL="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/${ASSET_NAME}"
+PACKAGE_FILE="$TMP_DIR/$ASSET_NAME"
 echo "Downloading $ASSET_URL ..."
-curl --fail --location --retry 3 --output "$TMP_DIR/release.tar.gz" "$ASSET_URL"
-tar -xzf "$TMP_DIR/release.tar.gz" -C "$TMP_DIR/staging"
-STAGING_APP="$TMP_DIR/staging/var/lib/immich/app"
-[[ -d "$STAGING_APP" && -f "$STAGING_APP/start.sh" && -f "$STAGING_APP/machine-learning/start.sh" ]] || {
-    echo 'ERROR: Release archive is missing expected app/start.sh files.' >&2
+curl --fail --location --retry 3 --output "$PACKAGE_FILE" "$ASSET_URL"
+curl --fail --location --retry 3 --output "$PACKAGE_FILE.sha256" "$ASSET_URL.sha256"
+# A release checksum detects transfer damage; the trusted APK signature is the
+# authenticity check. Never execute a checksum file's arbitrary path names.
+mapfile -t checksum_lines < "$PACKAGE_FILE.sha256"
+[[ ${#checksum_lines[@]} -eq 1 && "${checksum_lines[0]}" =~ ^([a-fA-F0-9]{64})[[:space:]]{2}([^[:space:]]+)$ ]] || {
+    echo 'ERROR: Invalid release checksum file.' >&2; exit 1;
+}
+expected_hash="${BASH_REMATCH[1]}"
+[[ "${BASH_REMATCH[2]}" == "$ASSET_NAME" ]] || {
+    echo 'ERROR: Release checksum names an unexpected file.' >&2; exit 1;
+}
+actual_hash="$(sha256sum "$PACKAGE_FILE")"
+actual_hash="${actual_hash%% *}"
+[[ "${actual_hash,,}" == "${expected_hash,,}" ]] || { echo 'ERROR: Package checksum mismatch.' >&2; exit 1; }
+apk "${APK_TRUST_ARGS[@]}" verify "$PACKAGE_FILE" || {
+    echo 'ERROR: APK verification failed. Install the trusted publisher public key in /etc/apk/keys.' >&2
+    echo 'For a deliberately unsigned build, explicitly pass --allow-untrusted.' >&2
     exit 1
 }
 
-# Prepare replacement app fully before switching directories.
-NEXT_APP="$IMMICH_PATH/.app-next-$$"
-cp -a "$STAGING_APP" "$NEXT_APP"
-chown -R immich:immich "$NEXT_APP"
+# Read only the APKv3 info fields; do not evaluate package metadata as shell.
+# Consume the entire dump so pipefail also catches a malformed package.
+apk "${APK_TRUST_ARGS[@]}" adbdump "$PACKAGE_FILE" | awk '
+    /^info:$/ { in_info=1; next }
+    in_info && /^[^ ]/ { in_info=0 }
+    in_info && /^  (name|version|arch|hashes): / { print }
+' > "$TMP_DIR/package-info"
+PACKAGE_NAME="$(sed -n 's/^  name: //p' "$TMP_DIR/package-info")"
+PACKAGE_VERSION="$(sed -n 's/^  version: //p' "$TMP_DIR/package-info")"
+PACKAGE_ARCH="$(sed -n 's/^  arch: //p' "$TMP_DIR/package-info")"
+PACKAGE_ID="$(sed -n 's/^  hashes: //p' "$TMP_DIR/package-info")"
+[[ "$PACKAGE_NAME" == immich && "$PACKAGE_ARCH" == "$APK_ARCH" && \
+   "$PACKAGE_VERSION" =~ ^[0-9][0-9a-z._]*-r[0-9]+$ && "$PACKAGE_ID" =~ ^[a-fA-F0-9]{40}$ ]] || {
+    echo 'ERROR: Release must be an Immich APKv3 package for this architecture with valid metadata.' >&2; exit 1;
+}
+apk version --check "$PACKAGE_VERSION" >/dev/null || { echo 'ERROR: Invalid APK version.' >&2; exit 1; }
+
+# The main package signs the checksum of its embedded runtime manifest. Its
+# identical small release sidecar can therefore be authenticated without
+# extracting the application. Older releases may not contain this manifest.
+INSTALL_APKS=("$PACKAGE_FILE")
+runtime_manifest_hash="$(apk "${APK_TRUST_ARGS[@]}" manifest "$PACKAGE_FILE" | \
+    awk '$2 == "usr/share/immich/runtime-apks.sha256" && NF == 2 { print $1 }')"
+if [[ -n "$runtime_manifest_hash" ]]; then
+    [[ "$runtime_manifest_hash" =~ ^sha256:([a-fA-F0-9]{64})$ ]] || {
+        echo 'ERROR: Invalid or duplicate embedded runtime manifest checksum.' >&2; exit 1;
+    }
+    expected_runtime_manifest_hash="${BASH_REMATCH[1]}"
+    runtime_manifest="$TMP_DIR/runtime-apks.sha256"
+    curl --fail --location --retry 3 --output "$runtime_manifest" "$ASSET_URL.runtime-apks.sha256"
+    actual_runtime_manifest_hash="$(sha256sum "$runtime_manifest")"
+    actual_runtime_manifest_hash="${actual_runtime_manifest_hash%% *}"
+    [[ "${actual_runtime_manifest_hash,,}" == "${expected_runtime_manifest_hash,,}" ]] || {
+        echo 'ERROR: Runtime manifest does not match the verified Immich package.' >&2; exit 1;
+    }
+
+    mkdir -p "$TMP_DIR/runtime-apks"
+    declare -A seen_runtime_apks=()
+    runtime_checksum_re='^([a-fA-F0-9]{64})  ([^[:space:]]+)$'
+    while IFS= read -r runtime_line || [[ -n "$runtime_line" ]]; do
+        [[ "$runtime_line" =~ $runtime_checksum_re ]] || {
+            echo 'ERROR: Invalid runtime package manifest line.' >&2; exit 1;
+        }
+        runtime_hash="${BASH_REMATCH[1]}"
+        runtime_name="${BASH_REMATCH[2]}"
+        [[ "$runtime_name" =~ ^[a-z0-9][a-z0-9+_.-]*-[0-9][0-9a-z._]*-r[0-9]+\.(x86_64|aarch64|noarch)\.apk$ ]] || {
+            echo "ERROR: Unsafe runtime APK filename: $runtime_name" >&2; exit 1;
+        }
+        [[ "${BASH_REMATCH[1]}" == "$APK_ARCH" || "${BASH_REMATCH[1]}" == noarch ]] || {
+            echo "ERROR: Runtime APK has the wrong architecture: $runtime_name" >&2; exit 1;
+        }
+        [[ -z "${seen_runtime_apks[$runtime_name]+x}" ]] || {
+            echo "ERROR: Duplicate runtime APK filename: $runtime_name" >&2; exit 1;
+        }
+        seen_runtime_apks["$runtime_name"]=1
+        runtime_file="$TMP_DIR/runtime-apks/$runtime_name"
+        echo "Downloading bundled runtime package $runtime_name ..."
+        curl --fail --location --retry 3 --output "$runtime_file" \
+            "https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/${runtime_name}"
+        actual_runtime_hash="$(sha256sum "$runtime_file")"
+        actual_runtime_hash="${actual_runtime_hash%% *}"
+        [[ "${actual_runtime_hash,,}" == "${runtime_hash,,}" ]] || {
+            echo "ERROR: Runtime APK checksum mismatch: $runtime_name" >&2; exit 1;
+        }
+        # These are original Alpine packages. Their signatures must be trusted
+        # even when the user has explicitly allowed an unsigned main package.
+        apk verify "$runtime_file" || {
+            echo "ERROR: Bundled runtime APK is not trusted by Alpine's installed keys: $runtime_name" >&2
+            exit 1
+        }
+        INSTALL_APKS+=("$runtime_file")
+    done < "$runtime_manifest"
+else
+    echo 'This older package has no bundled runtime manifest; using configured repositories.'
+fi
+
+# Seed a private cache explicitly. A same-version `apk add` is a no-op and does
+# not cache the file; `apk fix` otherwise skips unavailable local packages.
+# apk-tools 3 uses ${name}-${version}.${hash:8}.apk (src/context.c).
+CACHED_PACKAGE="$TMP_DIR/cache/immich-${PACKAGE_VERSION}.${PACKAGE_ID:0:8}.apk"
+cp -- "$PACKAGE_FILE" "$CACHED_PACKAGE"
+REINSTALL_SAME_VERSION=0
+apk info --installed "immich=$PACKAGE_VERSION" >/dev/null 2>&1 && REINSTALL_SAME_VERSION=1
+# Resolve dependencies before service downtime. Actual installation rechecks
+# signatures and dependencies; this does not execute package lifecycle hooks.
+# Simulation does not auto-refresh indexes, and this private cache starts empty.
+# Repository signatures remain mandatory even for an unsigned local main APK.
+apk "${APK_REPOSITORY_ARGS[@]}" --cache-dir "$TMP_DIR/cache" update || {
+    echo 'ERROR: Could not refresh runtime repository indexes; services have not been stopped.' >&2
+    exit 1
+}
+apk "${APK_TRUST_ARGS[@]}" "${APK_REPOSITORY_ARGS[@]}" --cache-dir "$TMP_DIR/cache" add --simulate "${INSTALL_APKS[@]}" || {
+    echo 'ERROR: Package dependencies could not be resolved; services have not been stopped.' >&2
+    echo 'If this build used newer native libraries, pass --repository URL for the matching runtime repository.' >&2
+    exit 1
+}
 
 if (( IS_UPGRADE )); then
     echo "Upgrading $SOURCE_VERSION -> $RELEASE_TAG"
@@ -249,103 +409,42 @@ if (( IS_UPGRADE )); then
     ATTEMPT_ACTIVE=1
 fi
 
-# Keep one local previous-app directory across retries. The durable rollback
-# copy is in backups/, and a failed retry must not overwrite that snapshot.
+# Move a legacy tar-installed app aside once, so obsolete unowned files cannot
+# survive migration. Once APK manages immich, only APK replaces its files.
+# A prior migration attempt may have left .app-previous and a pending record.
 PREVIOUS_APP="$IMMICH_PATH/.app-previous"
-if (( IS_UPGRADE )); then
-    if [[ -e "$PREVIOUS_APP" ]]; then
-        # Only an interrupted, tracked upgrade may have left this directory.
-        [[ -f "$PENDING_FILE" ]] || {
-            echo "ERROR: $PREVIOUS_APP exists but no upgrade is pending." >&2
-            exit 1
-        }
-        [[ -d "$IMMICH_PATH/app" ]] && rm -rf -- "$IMMICH_PATH/app"
-    else
-        [[ -d "$IMMICH_PATH/app" ]] || {
-            echo 'ERROR: No app to replace and no previous-app directory.' >&2
-            exit 1
-        }
-        mv "$IMMICH_PATH/app" "$PREVIOUS_APP"
-    fi
-elif [[ -e "$PREVIOUS_APP" ]]; then
+if (( ! IS_UPGRADE )) && [[ -e "$PREVIOUS_APP" || -L "$PREVIOUS_APP" ]]; then
     echo "ERROR: Stale $PREVIOUS_APP exists. Resolve it before a fresh install." >&2
     exit 1
 fi
-mv "$NEXT_APP" "$IMMICH_PATH/app"
-NEXT_APP=""
-
-# --- Create env only when absent; preserve existing credentials ---
-if [[ ! -f "$IMMICH_PATH/env" ]]; then
-    cat > "$IMMICH_PATH/env" <<'ENV'
-# --- Immich server ---
-IMMICH_HOST=127.0.0.1
-IMMICH_PORT=2283
-
-# --- Database (external) ---
-DB_HOSTNAME=your-postgres-host
-DB_PORT=5432
-DB_USERNAME=immich
-DB_PASSWORD=YOUR_STRONG_RANDOM_PW
-DB_DATABASE_NAME=immich
-
-# --- Redis (external) ---
-REDIS_HOSTNAME=your-redis-host
-REDIS_PORT=6379
-REDIS_PASSWORD=your-redis-password
-
-# --- Machine learning ---
-MACHINE_LEARNING_HOST=127.0.0.1
-MACHINE_LEARNING_PORT=3003
-MACHINE_LEARNING_WORKERS=1
-MACHINE_LEARNING_WORKER_TIMEOUT=300
-MACHINE_LEARNING_CACHE_FOLDER=/var/lib/immich/cache
-TRANSFORMERS_CACHE=/var/lib/immich/cache
-HF_HOME=/var/lib/immich/cache/hf-cache
-
-NODE_OPTIONS="--max-old-space-size=512"
-ENV
-    chown immich:immich "$IMMICH_PATH/env"
-    chmod 600 "$IMMICH_PATH/env"
-    echo "Created \"$IMMICH_PATH/env\". Please edit DB/Redis credentials before starting."
+if (( IS_UPGRADE && ! APK_MANAGED )); then
+    [[ ! -L "$IMMICH_PATH/app" && ! -L "$PREVIOUS_APP" ]] || {
+        echo 'ERROR: Refusing to migrate a symlinked application directory.' >&2; exit 1;
+    }
+    if [[ -d "$IMMICH_PATH/app" ]]; then
+        if [[ -d "$PREVIOUS_APP" ]]; then
+            # The completed backup and pending record were validated above.
+            rm -rf -- "$IMMICH_PATH/app"
+        else
+            mv "$IMMICH_PATH/app" "$PREVIOUS_APP"
+        fi
+    fi
 fi
 
-# --- Install OpenRC scripts atomically ---
-cat > "/etc/init.d/.immich.new.$$" <<'OPENRC'
-#!/sbin/openrc-run
-name="immich"
-description="Immich Server"
-command="/var/lib/immich/app/start.sh"
-command_user="immich:immich"
-command_background="yes"
-stopgroup="yes"
-pidfile="/run/${RC_SVCNAME}.pid"
-output_log="/var/log/immich/immich.log"
-error_log="/var/log/immich/immich.err"
-depend() {
-    need localmount
-    need immich-ml
-    after firewall
+echo "Installing Immich package $PACKAGE_VERSION ..."
+apk "${APK_TRUST_ARGS[@]}" "${APK_REPOSITORY_ARGS[@]}" --cache-dir "$TMP_DIR/cache" add "${INSTALL_APKS[@]}"
+if (( REINSTALL_SAME_VERSION )); then
+    # A retry must restore files even when the previous transaction already
+    # committed this version. fix takes a package NAME, not a local file path.
+    apk "${APK_TRUST_ARGS[@]}" "${APK_REPOSITORY_ARGS[@]}" --cache-dir "$TMP_DIR/cache" fix --reinstall immich
+fi
+[[ -f "$IMMICH_PATH/app/start.sh" && -f "$IMMICH_PATH/app/dist/main.js" && \
+   -f "$IMMICH_PATH/app/machine-learning/start.sh" && -f "$IMMICH_PATH/env" && \
+   -x /etc/init.d/immich && -x /etc/init.d/immich-ml ]] || {
+    echo 'ERROR: Installed package or runtime setup is incomplete.' >&2; exit 1;
 }
-OPENRC
-cat > "/etc/init.d/.immich-ml.new.$$" <<'OPENRC'
-#!/sbin/openrc-run
-name="immich-ml"
-description="Immich Machine Learning"
-command="/var/lib/immich/app/machine-learning/start.sh"
-command_user="immich:immich"
-command_background="yes"
-stopgroup="yes"
-pidfile="/run/${RC_SVCNAME}.pid"
-output_log="/var/log/immich/immich-ml.log"
-error_log="/var/log/immich/immich-ml.err"
-depend() {
-    need localmount
-    after firewall
-}
-OPENRC
-chmod 755 "/etc/init.d/.immich.new.$$" "/etc/init.d/.immich-ml.new.$$"
-mv "/etc/init.d/.immich.new.$$" /etc/init.d/immich
-mv "/etc/init.d/.immich-ml.new.$$" /etc/init.d/immich-ml
+# The package owns OpenRC scripts and creates env only if absent. Enable its
+# services here; a fresh installation stays stopped until credentials are set.
 rc-update add immich default
 rc-update add immich-ml default
 
