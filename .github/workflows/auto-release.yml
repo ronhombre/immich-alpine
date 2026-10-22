@@ -35,7 +35,9 @@ jobs:
             --title "${VERSION}" \
             --notes "**Full Changelog**: https://github.com/ronhombre/immich-alpine/compare/${PREV_TAG}...${VERSION}
 
-          Please see https://github.com/immich-app/immich/releases/tag/${VERSION}"
+          Please see https://github.com/immich-app/immich/releases/tag/${VERSION}
+          
+          If you're not yet seeing the tar below, it must still be getting built. Please allow at least 15 minutes."
 
       - name: Trigger build
         env:
