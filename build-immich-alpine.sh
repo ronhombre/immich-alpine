@@ -43,7 +43,7 @@ Options:
   --maintainer TEXT     Public package contact, normally 'Name <email>'.
   --description TEXT   Human-readable package description.
   --url URL            Package information/project URL.
-  --no-bundle-runtime  Skip companion runtime APKs; targets must then supply
+  --no-bundle-runtime  Skip embedded runtime APKs; targets must then supply
                        repositories containing the required native libraries.
   --package-only       Package an already completed app in the disposable builder.
                        Requires the same IMMICH_REV/APK_VERSION as that build.
@@ -62,8 +62,8 @@ Environment:
   APK_MAINTAINER        Public maintainer contact; omitted when unset.
   APK_DESCRIPTION       Package description; default: Immich for Alpine description.
   APK_URL               Package information URL; default: https://immich.app.
-  APK_BUNDLE_RUNTIME    1 (default): ship exact installed runtime packages that
-                       are unavailable in Alpine 3.24 stable. Set 0 to opt out.
+  APK_BUNDLE_RUNTIME    1 (default): embed exact installed runtime APKs that are
+                       unavailable in Alpine 3.24 stable. Set 0 to opt out.
   APK_RUNTIME_REPOSITORY Extra build-time source for those packages; default:
                        https://dl-cdn.alpinelinux.org/alpine/edge/community.
   ARTIFACT_DIR          Absolute output directory; default: /tmp/immich-alpine-dist.
@@ -75,13 +75,12 @@ Outputs (arch is x86_64 or aarch64):
   $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk
   $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk.sha256
   $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk.pub  (only when signed)
-  $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk.runtime-apks.sha256
-  $ARTIFACT_DIR/runtime-apks/<name>-<version>.<arch>.apk  (when required)
 
-The runtime manifest is also embedded in the Immich APK, so its signature
-authenticates the companion APK list and hashes. Companion packages retain
-their original Alpine signatures, licenses, and maintainers. They are not
-rebuilt or merged into Immich. Ordinary dependencies still come from stable.
+Required additional runtime APKs and their checksum manifest are INSIDE the
+Immich APK under /usr/share/immich. Its signature protects the whole bundle.
+Use the supplied installer: it extracts and verifies these original Alpine
+APKs, then installs them with Immich in one APK transaction. There are no
+separate dependency release assets. Ordinary dependencies come from stable.
 
 With no key, the package is unsigned; installation requires an explicit
 apk add --allow-untrusted. Signed installs require the matching public key
@@ -138,7 +137,7 @@ for name in sorted(versions):
 validate_payload() {
   python3 - "$1" <<'PY'
 from pathlib import Path
-import os, stat, sys
+import hashlib, os, re, stat, sys
 root = Path(sys.argv[1])
 app = root / 'var/lib/immich/app'
 def fail(message):
@@ -180,6 +179,27 @@ parents = {'etc', 'etc/init.d', 'usr', 'usr/share', 'usr/share/immich',
 support = {'etc/init.d/immich', 'etc/init.d/immich-ml',
            'usr/share/immich/immich.env.example', 'usr/share/immich/runtime-apks.sha256',
            'var/lib/immich/i18n'}
+bundle = root / 'usr/share/immich/runtime-apks'
+if not bundle.is_dir() or bundle.is_symlink():
+    fail('missing regular embedded runtime directory')
+parents.add('usr/share/immich/runtime-apks')
+seen = set()
+for line in (root / 'usr/share/immich/runtime-apks.sha256').read_text().splitlines():
+    match = re.fullmatch(r'([0-9a-f]{64})  ([a-z0-9][a-z0-9+_.-]*-[0-9][0-9a-z._]*-r[0-9]+\.(?:x86_64|aarch64)\.apk)', line)
+    if not match:
+        fail('invalid embedded runtime manifest entry')
+    expected, filename = match.groups()
+    if '..' in filename or filename in seen:
+        fail('unsafe or duplicate embedded runtime filename: ' + filename)
+    seen.add(filename)
+    p = bundle / filename
+    if not p.is_file() or p.is_symlink():
+        fail('missing regular embedded runtime APK: ' + filename)
+    with p.open('rb') as stream:
+        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+    if actual != expected:
+        fail('embedded runtime APK checksum mismatch: ' + filename)
+    support.add('usr/share/immich/runtime-apks/' + filename)
 for base, dirs, names in os.walk(root, followlinks=False):
     for name in dirs + names:
         p = Path(base, name)
@@ -408,7 +428,7 @@ for name, version in selected:
 (work / 'selected.tsv').write_text(''.join(name + '\t' + version + '\n' for name, version in selected))
 PY
   if [[ ! -s "$work/selected.tsv" ]]; then
-    log 'All installed runtime packages are available from Alpine 3.24; no companion APKs required.'
+    log 'All installed runtime packages are available from Alpine 3.24; no embedded runtime APKs required.'
     return 0
   fi
 
@@ -421,18 +441,18 @@ PY
   while IFS=$'\t' read -r name version; do
     [[ -f "$work/fetched/$name-$version.apk" && ! -L "$work/fetched/$name-$version.apk" ]] || \
       fatal "Missing exact runtime APK: $name=$version"
-    # No --allow-untrusted: each original companion must pass Alpine key trust.
+    # No --allow-untrusted: each original runtime APK must pass Alpine key trust.
     apk verify "$work/fetched/$name-$version.apk"
     asset="$name-$version.$APK_ARCH.apk"
     install -m 0644 "$work/fetched/$name-$version.apk" "$bundle_dir/$asset"
     (cd "$bundle_dir"; sha256sum "$asset") >> "$manifest_path"
-    log "Runtime companion: $asset"
+    log "Embedding runtime APK: $asset"
   done < "$work/selected.tsv"
 }
 
 # Called only by the root parent after all upstream build commands have finished.
 package_app() {
-  local stage scripts runtime_dir runtime_manifest runtime_file source_sha build_ref
+  local stage scripts runtime_dir runtime_manifest source_sha build_ref
   local node_major vips_version libraw_version dependency_list current_runtime_versions recorded_runtime_versions
   local -a signing_args=() verify_args=(--allow-untrusted) metadata_args=()
   [[ -f "$APP/.build-complete" && -f "$APP/.build-info" ]] || fatal 'No completed app to package.'
@@ -467,6 +487,7 @@ package_app() {
   ln -s app/i18n "$stage/var/lib/immich/i18n"
   write_package_support "$stage" "$scripts"
   install -m 0644 "$runtime_manifest" "$stage/usr/share/immich/runtime-apks.sha256"
+  cp -a "$runtime_dir" "$stage/usr/share/immich/runtime-apks"
   # Never embed the builder account's numeric UID/GID or dereference symlinks.
   python3 - "$stage" <<'PY'
 from pathlib import Path
@@ -520,14 +541,7 @@ PY
     --script "post-deinstall:$scripts/post-deinstall" \
     --output "$PKG_WORK/$ASSET_NAME" "${metadata_args[@]}" "${signing_args[@]}"
   verify_apk "$PKG_WORK/$ASSET_NAME" "${verify_args[@]}"
-  # Only original, verified runtime APKs reach the public output directory.
-  # The temporary fetched closure and builder caches remain under PKG_WORK.
-  mkdir -p "$ARTIFACT_DIR/runtime-apks"
-  for runtime_file in "$runtime_dir/"*.apk; do
-    [[ -f "$runtime_file" ]] || continue
-    install -m 0644 "$runtime_file" "$ARTIFACT_DIR/runtime-apks/${runtime_file##*/}"
-  done
-  install -m 0644 "$runtime_manifest" "$ARTIFACT_DIR/$ASSET_NAME.runtime-apks.sha256"
+  # Runtime APKs are already inside the signed payload. Publish one APK only.
   if [[ -n "$APK_SIGNING_KEY" ]]; then
     install -m 0644 "$PKG_WORK/keys/$ASSET_NAME.pub" "$ARTIFACT_DIR/$ASSET_NAME.pub"
   fi
@@ -542,7 +556,6 @@ PY
   log "Build successful: $IMMICH_REV ($source_sha), APK $APK_VERSION-r$APK_RELEASE [$APK_ARCH]"
   log "Release asset: $ARTIFACT_DIR/$ASSET_NAME"
   log "Checksum: $ARTIFACT_DIR/$ASSET_NAME.sha256"
-  log "Runtime manifest: $ARTIFACT_DIR/$ASSET_NAME.runtime-apks.sha256"
   [[ -z "$APK_SIGNING_KEY" ]] || log "Public key: $ARTIFACT_DIR/$ASSET_NAME.pub"
 }
 
@@ -626,8 +639,8 @@ if [[ "$MODE" != build-app ]]; then
   fi
   mkdir -p "$ARTIFACT_DIR"
   [[ ! -L "$ARTIFACT_DIR/runtime-apks" ]] || fatal 'Refusing a symlinked runtime APK output directory.'
-  # This directory is reserved for companion APKs. Keep other architectures'
-  # assets intact if several builds share the same output directory.
+  # Also remove external runtime artifacts left by an older builder. Keep
+  # other architectures' assets intact when builds share an output directory.
   remove_public_assets() {
     rm -f -- "$ARTIFACT_DIR/$ASSET_NAME" "$ARTIFACT_DIR/$ASSET_NAME.sha256" \
       "$ARTIFACT_DIR/$ASSET_NAME.pub" "$ARTIFACT_DIR/.$ASSET_NAME.partial" \
@@ -985,7 +998,7 @@ for required in \
   "$APP/machine-learning/log_conf.json"; do
   [[ -e "$required" ]] || fatal "Missing required artifact path: $required"
 done
-
+# A GitHub Release must never contain credentials. The build tree must be clean.
 [[ ! -e "$APP/env" && ! -e "$APP/.env" ]] || fatal 'Build tree contains environment credentials.'
 NODE_VERSION="$(node --version)"
 PYTHON_VERSION="$(/usr/bin/python3 --version 2>&1)"
@@ -1017,8 +1030,8 @@ $RUNTIME_APK_VERSIONS
 binaryen=$BINARYEN_VERSION
 built_at=$BUILT_AT
 EOF
+
 printf '%s\n' "$BUILT_AT" > "$APP/.build-complete"
 
 SUCCESS=1
-
 log "Application build complete: $IMMICH_REV ($SOURCE_SHA); returning to root for packaging."

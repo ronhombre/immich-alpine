@@ -25,7 +25,7 @@ while (( $# )); do
             printf 'Default: latest stable release from ronhombre/immich-alpine.\n'
             printf 'Trust the publisher public key in /etc/apk/keys before installing.\n'
             printf 'Unsigned packages require --allow-untrusted or IMMICH_ALLOW_UNTRUSTED=1.\n'
-            printf 'Bundled runtime APKs are authenticated by the main package manifest and Alpine signatures.\n'
+            printf 'Runtime APKs are contained inside the Immich APK and checked against Alpine signatures.\n'
             printf '%s\n' '--repository is repeatable and adds repositories only for this package transaction.'
             printf 'IMMICH_APK_REPOSITORY supplies one additional runtime repository.\n'
             printf 'For an older build or one made without bundled Edge runtime libraries:\n'
@@ -287,9 +287,9 @@ PACKAGE_ID="$(sed -n 's/^  hashes: //p' "$TMP_DIR/package-info")"
 }
 apk version --check "$PACKAGE_VERSION" >/dev/null || { echo 'ERROR: Invalid APK version.' >&2; exit 1; }
 
-# The main package signs the checksum of its embedded runtime manifest. Its
-# identical small release sidecar can therefore be authenticated without
-# extracting the application. Older releases may not contain this manifest.
+# The main APK contains both the runtime manifest and the original Alpine APKs.
+# Its signature authenticates their bytes; the Alpine signatures below are
+# checked independently. Older releases may not contain a runtime manifest.
 INSTALL_APKS=("$PACKAGE_FILE")
 runtime_manifest_hash="$(apk "${APK_TRUST_ARGS[@]}" manifest "$PACKAGE_FILE" | \
     awk '$2 == "usr/share/immich/runtime-apks.sha256" && NF == 2 { print $1 }')"
@@ -299,14 +299,45 @@ if [[ -n "$runtime_manifest_hash" ]]; then
     }
     expected_runtime_manifest_hash="${BASH_REMATCH[1]}"
     runtime_manifest="$TMP_DIR/runtime-apks.sha256"
-    curl --fail --location --retry 3 --output "$runtime_manifest" "$ASSET_URL.runtime-apks.sha256"
+    if [[ "${expected_runtime_manifest_hash,,}" == e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ]]; then
+        # The signed checksum identifies an empty manifest; there is no bundle
+        # to extract in builds that use only the configured repositories.
+        : > "$runtime_manifest"
+        mkdir -p "$TMP_DIR/runtime-apks"
+    else
+        # apk-tools 3 cannot extract selected paths. Extract natively into a
+        # private directory, retain only the bundle, and immediately discard
+        # the staged application before the real package transaction.
+        extracted_package="$TMP_DIR/extracted-package"
+        mkdir -p "$extracted_package"
+        echo 'Extracting embedded Alpine runtime packages ...'
+        apk "${APK_TRUST_ARGS[@]}" extract --destination "$extracted_package" "$PACKAGE_FILE" || {
+            echo 'ERROR: Could not extract the verified Immich package.' >&2; exit 1;
+        }
+        for runtime_parent in usr usr/share usr/share/immich; do
+            [[ -d "$extracted_package/$runtime_parent" && ! -L "$extracted_package/$runtime_parent" ]] || {
+                echo 'ERROR: Invalid embedded runtime bundle directory.' >&2; exit 1;
+            }
+        done
+        embedded_manifest="$extracted_package/usr/share/immich/runtime-apks.sha256"
+        embedded_runtime_dir="$extracted_package/usr/share/immich/runtime-apks"
+        [[ -f "$embedded_manifest" && ! -L "$embedded_manifest" ]] || {
+            echo 'ERROR: The embedded runtime manifest is missing or is not a regular file.' >&2; exit 1;
+        }
+        [[ -d "$embedded_runtime_dir" && ! -L "$embedded_runtime_dir" ]] || {
+            echo 'ERROR: Runtime APKs are missing from the Immich package. Rebuild this release with its runtime APKs embedded.' >&2
+            exit 1
+        }
+        mv -- "$embedded_manifest" "$runtime_manifest"
+        mv -- "$embedded_runtime_dir" "$TMP_DIR/runtime-apks"
+        rm -rf -- "$extracted_package"
+    fi
     actual_runtime_manifest_hash="$(sha256sum "$runtime_manifest")"
     actual_runtime_manifest_hash="${actual_runtime_manifest_hash%% *}"
     [[ "${actual_runtime_manifest_hash,,}" == "${expected_runtime_manifest_hash,,}" ]] || {
         echo 'ERROR: Runtime manifest does not match the verified Immich package.' >&2; exit 1;
     }
 
-    mkdir -p "$TMP_DIR/runtime-apks"
     declare -A seen_runtime_apks=()
     runtime_checksum_re='^([a-fA-F0-9]{64})  ([^[:space:]]+)$'
     while IFS= read -r runtime_line || [[ -n "$runtime_line" ]]; do
@@ -326,9 +357,12 @@ if [[ -n "$runtime_manifest_hash" ]]; then
         }
         seen_runtime_apks["$runtime_name"]=1
         runtime_file="$TMP_DIR/runtime-apks/$runtime_name"
-        echo "Downloading bundled runtime package $runtime_name ..."
-        curl --fail --location --retry 3 --output "$runtime_file" \
-            "https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/${runtime_name}"
+        [[ -f "$runtime_file" && ! -L "$runtime_file" ]] || {
+            echo "ERROR: Embedded runtime APK is missing or is not a regular file: $runtime_name" >&2
+            echo 'Rebuild this release with all runtime APKs contained inside the Immich package.' >&2
+            exit 1
+        }
+        echo "Verifying embedded runtime package $runtime_name ..."
         actual_runtime_hash="$(sha256sum "$runtime_file")"
         actual_runtime_hash="${actual_runtime_hash%% *}"
         [[ "${actual_runtime_hash,,}" == "${runtime_hash,,}" ]] || {

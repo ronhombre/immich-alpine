@@ -26,7 +26,7 @@ on:
         required: false
         default: 'Ron Lauren Hombre <ronlauren@hombre.asia>'
       bundle_runtime:
-        description: 'Include the additional runtime APKs required from Edge'
+        description: 'Embed additional runtime APKs in the Immich package'
         type: boolean
         required: false
         default: true
@@ -47,6 +47,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-26.04
+    environment: "Auto Build"
     container:
       image: alpine:3.24
       options: --user root
@@ -118,9 +119,9 @@ jobs:
           # Immich v3.2.0 uses Sharp 0.35.3, which needs libvips >=8.18.3;
           # Alpine 3.24 currently provides 8.18.2. Retain the original builder's
           # Edge override and keep the related vips packages aligned. By default
-          # the builder also publishes the minimal required Edge runtime APKs;
-          # targets install those local companions without enabling Edge. When
-          # bundling is disabled, provide compatible runtime libraries yourself.
+          # the builder embeds the minimal required Edge runtime APKs inside the
+          # Immich APK; the supplied installer installs those embedded packages.
+          # When embedding is disabled, provide compatible runtime libraries.
           apk add --upgrade --no-cache \
             --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
             vips vips-cpp vips-dev vips-jxl libraw libraw-dev
@@ -166,47 +167,18 @@ jobs:
             *) echo "ERROR: Unsupported artifact architecture: $arch" >&2; exit 1 ;;
           esac
           asset="immich-alpine-3.24-${arch}.apk"
-          manifest="$ARTIFACT_DIR/$asset.runtime-apks.sha256"
           for file in "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256"; do
             [[ -f "$file" && ! -L "$file" && -s "$file" ]]
           done
-          # Empty manifests are valid when no additional runtime APK is needed.
-          [[ -f "$manifest" && ! -L "$manifest" ]]
           (cd "$ARTIFACT_DIR" && sha256sum -c "$asset.sha256")
           output_files=("$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256")
           if (( ${#signing_args[@]} )); then
             [[ -f "$ARTIFACT_DIR/$asset.pub" && ! -L "$ARTIFACT_DIR/$asset.pub" && -s "$ARTIFACT_DIR/$asset.pub" ]]
             output_files+=("$ARTIFACT_DIR/$asset.pub")
           fi
-          output_files+=("$manifest")
 
-          declare -A runtime_seen=()
-          runtime_line_pattern="^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+-]*\.${arch}\.apk)$"
-          while IFS= read -r line || [[ -n "$line" ]]; do
-            [[ "$line" =~ $runtime_line_pattern ]] || {
-              echo 'ERROR: Invalid runtime APK checksum manifest entry.' >&2
-              exit 1
-            }
-            checksum="${BASH_REMATCH[1]}"
-            runtime_asset="${BASH_REMATCH[2]}"
-            [[ "$runtime_asset" != *..* && -z "${runtime_seen[$runtime_asset]+present}" ]] || {
-              echo 'ERROR: Unsafe or duplicate runtime APK filename.' >&2
-              exit 1
-            }
-            runtime_seen["$runtime_asset"]=1
-            runtime_path="$ARTIFACT_DIR/runtime-apks/$runtime_asset"
-            [[ -d "$ARTIFACT_DIR/runtime-apks" && ! -L "$ARTIFACT_DIR/runtime-apks" ]]
-            [[ -f "$runtime_path" && ! -L "$runtime_path" && -s "$runtime_path" ]]
-            actual_checksum="$(sha256sum "$runtime_path")"
-            [[ "${actual_checksum%% *}" == "$checksum" ]] || {
-              echo "ERROR: Runtime APK checksum mismatch: $runtime_asset" >&2
-              exit 1
-            }
-            output_files+=("$runtime_path")
-          done < "$manifest"
-
-          # Upload only checked, explicitly named public files. Unlisted files
-          # in runtime-apks/ and all build/private-key directories stay excluded.
+          # Runtime APKs are contained in the main APK. Publish only these two
+          # or three named files, including when old build outputs still exist.
           {
             printf 'arch=%s\nfiles<<IMMICH_APK_FILES\n' "$arch"
             printf '%s\n' "${output_files[@]}"

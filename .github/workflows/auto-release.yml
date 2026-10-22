@@ -37,7 +37,7 @@ jobs:
 
           Please see https://github.com/immich-app/immich/releases/tag/${VERSION}
           
-          If you're not yet seeing the tar below, it must still be getting built. Please allow at least 15 minutes."
+          If you're not yet seeing the signed APK below, it must still be building. Please allow at least 15 minutes and come back."
 
       - name: Trigger build
         env:
