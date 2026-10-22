@@ -220,7 +220,7 @@ jobs:
           SIGNING_DIR: ${{ steps.build.outputs.signing_dir }}
         run: |
           if [[ "$SIGNING_DIR" == /tmp/immich-apk-signing.* ]]; then
-            find "$SIGNING_DIR" -type f -exec shred -uz {} + && rm -rf "$SIGNING_DIR"
+            rm -rf -- "$SIGNING_DIR"
           fi
 
       - name: Upload APK to GitHub Release
