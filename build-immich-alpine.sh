@@ -72,10 +72,11 @@ Environment:
   IMMICH_EXPECTED_COMMIT Optional expected full upstream commit SHA.
   IMMICH_ALPINE_RELEASE Optional GitHub release tag recorded in build metadata.
 
-Outputs (arch is x86_64 or aarch64):
-  $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk
-  $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk.sha256
-  $ARTIFACT_DIR/immich-alpine-3.24-<arch>.apk.pub  (only when signed)
+Outputs (architecture remains in the package metadata):
+  $ARTIFACT_DIR/immich-alpine-<version>-r<revision>.apk
+  $ARTIFACT_DIR/immich-alpine-<version>-r<revision>.apk.sha256
+  $ARTIFACT_DIR/immich-alpine-<version>-r<revision>.apk.pub  (only when signed)
+  Use separate ARTIFACT_DIR values when building multiple architectures.
 
 Required newer runtime files are part of the Immich APK itself. The package
 declares their real package names, versions, shared-library provides, and
@@ -242,9 +243,20 @@ PY
   python3 - "$check_dir/metadata" "$check_dir/root" <<'PY'
 from pathlib import Path
 import json, sys
-info = json.loads(Path(sys.argv[1]).read_text())['info']
+package_metadata = json.loads(Path(sys.argv[1]).read_text())
+info = package_metadata['info']
 root = Path(sys.argv[2])
 audit = json.loads((root / 'usr/share/immich/bundled-runtime.json').read_text())
+if sorted(package_metadata.get('triggers', [])) != sorted(audit.get('triggers', [])):
+    raise SystemExit('APK omits original runtime triggers')
+controls = [{key: package[key] for key in ('name', 'version', 'scripts', 'triggers')}
+            for package in audit['packages']]
+expected_controls = 'BUNDLED_RUNTIME = ' + repr(controls)
+actions = ['pre-install', 'post-install', 'pre-upgrade', 'post-upgrade', 'pre-deinstall', 'post-deinstall']
+if audit.get('triggers'): actions.append('trigger')
+for action in actions:
+    if expected_controls not in package_metadata.get('scripts', {}).get(action, ''):
+        raise SystemExit('APK hook omits original runtime callbacks: ' + action)
 for field in ('provides', 'replaces'):
     if sorted(info.get(field, [])) != sorted(audit[field]):
         raise SystemExit('APK metadata does not declare its actual bundled runtime ' + field)
@@ -354,7 +366,8 @@ guard_paths() {
         safe_dir "$path"
     done
     for path in "$base/env" "$base/.immich-version" "$pending" "$prepared" \
-        "$state/pending.new" "$state/prepared.new" "$state/version.new"; do
+        "$state/pending.new" "$state/prepared.new" "$state/version.new" \
+        "$state/runtime-before.json" "$state/runtime-before.new"; do
         safe_file "$path"
     done
 }
@@ -371,6 +384,111 @@ failed_hook() {
     exit "$result"
 }
 trap failed_hook 0
+
+# Verified dependency control scripts are carried by the Immich APK's own hooks.
+# Only read-only installed-package queries occur here; never apk add or downloads.
+run_bundled_runtime_hooks() {
+    python3 - "$@" <<'RUNTIME_HOOKS_PY'
+from pathlib import Path
+import fnmatch, glob, json, os, re, shlex, subprocess, sys, tempfile
+BUNDLED_RUNTIME = None
+phase, *changed = sys.argv[1:]
+state = Path('/var/lib/immich/.apk-state')
+snapshot = state / 'runtime-before.json'
+
+def fail(message):
+    raise SystemExit('Immich bundled runtime: ' + message)
+
+def versions(data):
+    if not isinstance(data, dict) or any(not isinstance(k, str) or not isinstance(v, str)
+                                       for k, v in data.items()):
+        fail('invalid saved runtime versions')
+    return data
+
+def read_regular(path):
+    if path.is_symlink() or not path.is_file():
+        fail('expected regular metadata file: ' + str(path))
+    details = path.stat()
+    if details.st_uid != 0 or details.st_mode & 0o022:
+        fail('runtime metadata must be root-owned and not group/world-writable: ' + str(path))
+    return json.loads(path.read_text())
+
+def save_versions():
+    # Keep original versions across an interrupted installation/upgrade retry.
+    if os.path.lexists(snapshot):
+        return versions(read_regular(snapshot))
+    result = subprocess.run(['apk', 'query', '--from', 'installed', '--all-matches',
+                             '--format', 'json', '--fields', 'name,version', '*'],
+                            check=True, text=True, stdout=subprocess.PIPE)
+    rows = json.loads(result.stdout)
+    if not isinstance(rows, list): fail('invalid installed-package query result')
+    saved = {row['name']: row['version'] for row in rows}
+    previous = Path('/usr/share/immich/bundled-runtime.json')
+    if os.path.lexists(previous):
+        old = read_regular(previous)
+        for package in old.get('packages', []):
+            saved[package['name']] = package['version']
+    versions(saved)
+    temp = state / 'runtime-before.new'
+    if os.path.lexists(temp):
+        if temp.is_symlink() or not temp.is_file(): fail('unsafe temporary runtime state')
+        temp.unlink()
+    with temp.open('x') as stream:
+        json.dump(saved, stream, sort_keys=True)
+        stream.write('\n')
+    os.chmod(temp, 0o600)
+    temp.replace(snapshot)
+    return saved
+
+def invoke(package, action, arguments):
+    script = package['scripts'].get(action)
+    if not script: return
+    # Run the original body with its own version arguments and shebang flags.
+    # A subprocess isolates exit, cd, traps, and shell options from Immich's hook.
+    interpreter = shlex.split(script.splitlines()[0][2:])
+    if not interpreter or interpreter[0] not in ('/bin/sh', '/bin/ash'):
+        fail('unsupported original runtime interpreter')
+    with tempfile.TemporaryDirectory(prefix='immich-runtime-hook-') as directory:
+        path = Path(directory) / (package['name'] + '.' + action)
+        path.write_text(script)
+        os.chmod(path, 0o700)
+        env = dict(os.environ, APK_SCRIPT=action, APK_PACKAGE_NAME=package['name'],
+                   APK_PACKAGE_VERSION=package['version'])
+        print('Immich runtime: ' + package['name'] + '.' + action, flush=True)
+        subprocess.run([*interpreter, str(path), *arguments], env=env, check=True)
+
+def trigger(package, directories=None):
+    if 'trigger' not in package['scripts']: return
+    patterns = [pattern.removeprefix('+') for pattern in package['triggers']]
+    if directories is None:
+        matched = sorted({path for pattern in patterns for path in glob.glob(pattern)
+                          if Path(path).is_dir()})
+    else:
+        matched = [path for path in directories
+                   if any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)]
+    if matched: invoke(package, 'trigger', matched)
+
+if BUNDLED_RUNTIME is None: fail('runtime callback metadata was not embedded')
+if BUNDLED_RUNTIME:
+    if phase in ('pre', 'post'):
+        before = save_versions() if phase == 'pre' else versions(read_regular(snapshot))
+        for package in BUNDLED_RUNTIME:
+            old = before.get(package['name'])
+            action = phase + ('-upgrade' if old is not None else '-install')
+            arguments = [package['version']] + ([old] if old is not None else [])
+            invoke(package, action, arguments)
+        if phase == 'post':
+            # Refresh loader caches before restarting Immich. APK also registers
+            # the original trigger paths to handle later dependency changes.
+            for package in BUNDLED_RUNTIME: trigger(package)
+    elif phase == 'trigger':
+        for package in BUNDLED_RUNTIME: trigger(package, changed)
+    elif phase in ('pre-deinstall', 'post-deinstall'):
+        for package in reversed(BUNDLED_RUNTIME): invoke(package, phase, [package['version']])
+    else:
+        fail('unknown runtime hook phase: ' + phase)
+RUNTIME_HOOKS_PY
+}
 
 ensure_account() {
     grep -q '^immich:' /etc/group || addgroup -S immich
@@ -477,6 +595,7 @@ pre_install_or_upgrade() {
     elif [ -n "$old_version" ]; then
         fail 'Installed application is missing and no completed upgrade snapshot is recorded.'
     fi
+    run_bundled_runtime_hooks pre
     if [ -n "$backup" ]; then
         printf '%s\tto=%s\tstarted\n' "$(now)" "$target_version" >> "$backup/attempts.log"
         printf '%s\nupgrade\n' "$target_version" > "$state/prepared.new"
@@ -577,6 +696,7 @@ post_install_or_upgrade() {
         *) fail 'Invalid prepared installation phase.' ;;
     esac
     setup_runtime
+    run_bundled_runtime_hooks post
     if [ "$phase" = fresh ]; then
         rc-update add immich-ml default
         rc-update add immich default
@@ -594,7 +714,7 @@ post_install_or_upgrade() {
     fi
     printf 'apk-%s\n' "$target_version" > "$state/version.new"
     mv "$state/version.new" "$base/.immich-version"
-    rm -f "$pending" "$prepared"
+    rm -f "$pending" "$prepared" "$state/runtime-before.json"
     if [ "$phase" = fresh ]; then
         echo 'Immich installed and enabled at boot; services remain stopped.'
         echo 'Configure /var/lib/immich/env, then run: rc-service immich-ml start; rc-service immich start'
@@ -609,19 +729,21 @@ post_install_or_upgrade() {
 case "$hook" in
     pre-install|pre-upgrade) pre_install_or_upgrade ;;
     post-install|post-upgrade) post_install_or_upgrade ;;
-    pre-deinstall) guard_paths; stop_services ;;
+    pre-deinstall) guard_paths; stop_services; run_bundled_runtime_hooks pre-deinstall ;;
     post-deinstall)
+        run_bundled_runtime_hooks post-deinstall
         for service in immich immich-ml; do
             if [ -e "/etc/runlevels/default/$service" ] || [ -L "/etc/runlevels/default/$service" ]; then
                 rc-update del "$service" default
             fi
         done
         echo 'Immich package removed. Account, configuration, media, caches and backups were retained.' ;;
+    trigger) run_bundled_runtime_hooks trigger "$@" ;;
     *) fail 'Unexpected APK lifecycle action.' ;;
 esac
 HOOK
   local hook
-  for hook in pre-install post-install pre-upgrade post-upgrade pre-deinstall post-deinstall; do
+  for hook in pre-install post-install pre-upgrade post-upgrade pre-deinstall post-deinstall trigger; do
     cp "$scripts/lifecycle" "$scripts/$hook"
     chmod 0755 "$scripts/$hook"
   done
@@ -732,7 +854,7 @@ PY
 package_app() {
   local stage scripts runtime_dir runtime_manifest runtime_metadata source_sha build_ref built_package_version
   local node_major vips_version libraw_version dependency_list current_runtime_versions recorded_runtime_versions
-  local runtime_provides runtime_replaces package_license
+  local runtime_provides runtime_replaces package_license runtime_trigger
   local -a signing_args=() verify_args=(--allow-untrusted) metadata_args=()
   [[ -d "$APP" && ! -L "$APP" && -f "$APP/.build-complete" && ! -L "$APP/.build-complete" && \
      -f "$APP/.build-info" && ! -L "$APP/.build-info" ]] || fatal 'No completed regular app and build metadata to package.'
@@ -772,6 +894,20 @@ package_app() {
   # Originals are temporary build inputs. Their verified runtime files and
   # truthful capabilities become part of this one native package.
   merge_runtime_apks "$stage" "$runtime_dir" "$runtime_manifest" "$runtime_metadata"
+  # Embed verified original callback bodies into native hooks, including pre-
+  # install (which cannot depend on the new payload already being unpacked).
+  python3 - "$stage/usr/share/immich/bundled-runtime.json" "$scripts" <<'PY_RUNTIME_CONTROLS'
+from pathlib import Path
+import json, sys
+manifest = json.loads(Path(sys.argv[1]).read_text())
+controls = [{key: package[key] for key in ('name', 'version', 'scripts', 'triggers')}
+            for package in manifest['packages']]
+for path in Path(sys.argv[2]).iterdir():
+    text = path.read_text()
+    if text.count('BUNDLED_RUNTIME = None') != 1:
+        raise SystemExit('Missing unique runtime-hook data placeholder in ' + path.name)
+    path.write_text(text.replace('BUNDLED_RUNTIME = None', 'BUNDLED_RUNTIME = ' + repr(controls)))
+PY_RUNTIME_CONTROLS
   # A packaging-only rebuild may increment -rN without recompiling the app.
   # Update only the staged metadata, leaving the completed build untouched.
   python3 - "$stage/var/lib/immich/app/.build-info" "$APK_VERSION-r$APK_RELEASE" <<'PY'
@@ -813,6 +949,12 @@ PY
   package_license="$(cat "$runtime_metadata/license")"
   [[ -z "$runtime_provides" ]] || metadata_args+=(--info "provides:$runtime_provides")
   [[ -z "$runtime_replaces" ]] || metadata_args+=(--info "replaces:$runtime_replaces")
+  if [[ -s "$runtime_metadata/triggers" ]]; then
+    metadata_args+=(--script "trigger:$scripts/trigger")
+    while IFS= read -r runtime_trigger; do
+      metadata_args+=(--trigger "$runtime_trigger")
+    done < "$runtime_metadata/triggers"
+  fi
   if [[ -n "$APK_SIGNING_KEY" ]]; then
     signing_args=(--sign-key "$APK_SIGNING_KEY")
     mkdir "$PKG_WORK/keys"
@@ -875,7 +1017,9 @@ import functools, hashlib, json, os, posixpath, re, shutil, stat, subprocess, sy
 stage, archives, manifest, metadata = map(Path, sys.argv[1:5])
 arch = sys.argv[5]
 def fail(message):
-    raise SystemExit('Runtime merge: ' + message)
+    source = globals().get('original')
+    context = (' [' + source.name + ']') if isinstance(source, Path) else ''
+    raise SystemExit('Runtime merge: ' + message + context)
 def command(*args):
     return subprocess.run(['apk', *map(str, args)], check=True, text=True, stdout=subprocess.PIPE).stdout
 def digest(path):
@@ -887,11 +1031,16 @@ def allowed(path, directory=False):
     parts = path.split('/')
     if any(p in ('', '.', '..') or any(ord(c) < 32 or ord(c) == 127 for c in p) for p in parts):
         return False
-    if directory and path in ('usr', 'usr/lib', 'usr/share', 'usr/share/licenses'):
-        return True
-    if not (path.startswith('usr/lib/') or path.startswith('usr/share/licenses/')):
-        return False
     if any(p in ('pkgconfig', 'cmake', '.cache', '.cargo', '.env', 'node_modules', 'home', 'backups') for p in parts):
+        return False
+    # These are paths INSIDE verified runtime APKs, not directories copied from
+    # the builder. Keep executables, loader helpers, and their runtime data too.
+    roots = ('usr/bin', 'usr/lib', 'usr/libexec', 'usr/share/licenses',
+             'usr/share/glycin-loaders', 'usr/share/glycin', 'usr/share/mime',
+             'usr/share/locale', 'usr/share/thumbnailers', 'usr/share/vips')
+    if directory and any(path == root or root.startswith(path + '/') for root in roots):
+        return True
+    if not any(path.startswith(root + '/') for root in roots):
         return False
     return not path.endswith(('.apk', '.a', '.la', '.tar', '.tar.gz'))
 def target_path(path, target):
@@ -899,7 +1048,7 @@ def target_path(path, target):
         fail('invalid runtime symlink target: ' + path)
     resolved = posixpath.normpath(target.lstrip('/') if target.startswith('/') else posixpath.join(posixpath.dirname(path), target))
     if not allowed(resolved):
-        fail('runtime symlink escapes the allowed library/license paths: ' + path)
+        fail('runtime symlink escapes the allowed runtime paths: ' + path)
     return resolved
 def audit_header(path, kind, mode, target=None):
     if not allowed(path, kind == 'directory'):
@@ -919,20 +1068,46 @@ def one(fields, name, required=True):
         fail('invalid package field: ' + name)
     return value
 
+CONTROL_ACTIONS = ('pre-install', 'post-install', 'pre-upgrade', 'post-upgrade',
+                   'pre-deinstall', 'post-deinstall', 'trigger')
+def check_controls(scripts, triggers, source):
+    if not isinstance(scripts, dict) or not isinstance(triggers, list):
+        fail('invalid runtime control metadata: ' + source)
+    for action, script in scripts.items():
+        if action not in CONTROL_ACTIONS or not isinstance(script, str):
+            fail('unsupported runtime control script: ' + source + ':' + action)
+        if not script or len(script.encode('utf-8')) > 1048576 or '\0' in script:
+            fail('invalid runtime control script: ' + source + ':' + action)
+        if not re.fullmatch(r'#!/bin/(?:a)?sh(?:[ \t]+-[A-Za-z]+)*', script.splitlines()[0]):
+            fail('runtime control script requires a supported sh/ash shebang: ' + source + ':' + action)
+    for pattern in triggers:
+        if (not isinstance(pattern, str) or not pattern or
+                any(ord(c) <= 32 or ord(c) == 127 for c in pattern) or '\\' in pattern):
+            fail('invalid runtime trigger: ' + source)
+        plain = pattern.removeprefix('+')
+        if not plain.startswith('/') or any(p in ('.', '..') for p in plain.split('/')):
+            fail('unsafe runtime trigger: ' + source)
+    if bool(triggers) != ('trigger' in scripts):
+        fail('runtime trigger paths/script do not match: ' + source)
+
 def read_metadata(path):
     with path.open('rb') as stream:
         magic = stream.read(4)
     if magic.startswith(b'ADB'):
         data = json.loads(command('adbdump', '--format', 'json', path))
         info = data.get('info', {})
-        if any(data.get('scripts', {}).values()) or data.get('triggers'):
-            fail('cannot silently merge lifecycle scripts/triggers from ' + path.name)
+        scripts = {k: v for k, v in data.get('scripts', {}).items() if v}
+        triggers = data.get('triggers', [])
+        check_controls(scripts, triggers, path.name)
         for directory in data.get('paths', []):
             dirname = directory['name']
             acl = directory.get('acl', {})
             if acl.get('user') != 'root' or acl.get('group') != 'root' or acl.get('xattrs'):
                 fail('non-root owner or extended attributes in ' + path.name)
-            audit_header(dirname, 'directory', acl['mode'])
+            if dirname:
+                audit_header(dirname, 'directory', acl['mode'])
+            elif directory.get('files'):
+                fail('runtime package contains files at filesystem root: ' + path.name)
             for entry in directory.get('files', []):
                 filename = entry['name']
                 if '/' in filename:
@@ -954,10 +1129,11 @@ def read_metadata(path):
             'depends': info.get('depends', []), 'provides': info.get('provides', []),
             'replaces': info.get('replaces', []), 'url': info.get('url', ''),
             'origin': info.get('origin', ''), 'maintainer': info.get('maintainer', ''),
+            'scripts': scripts, 'triggers': triggers,
         }
     if magic[:2] != b'\x1f\x8b':
         fail('unsupported original APK format: ' + path.name)
-    fields = {}
+    fields, scripts = {}, {}
     found_info = False
     # APKv2 consists of concatenated gzip/tar members. Parse only metadata and
     # headers with Python's standard tar reader; native apk extracts payloads.
@@ -979,20 +1155,26 @@ def read_metadata(path):
                 if not member.isfile():
                     fail('invalid signature control member')
             elif name.startswith('.') and '/' not in name:
-                fail('cannot silently merge lifecycle/control member ' + name + ' from ' + path.name)
+                action = name[1:]
+                if (action not in CONTROL_ACTIONS or action in scripts or not member.isfile()
+                        or member.size > 1048576 or member.uid != 0 or member.gid != 0):
+                    fail('unsupported or duplicate lifecycle/control member ' + name + ' from ' + path.name)
+                scripts[action] = archive.extractfile(member).read().decode('utf-8')
             else:
                 if member.uid != 0 or member.gid != 0 or any('xattr' in key for key in member.pax_headers):
                     fail('non-root owner or extended attributes in ' + name)
                 kind = 'directory' if member.isdir() else 'file' if member.isfile() else 'symlink' if member.issym() else 'special'
                 audit_header(name, kind, member.mode, member.linkname if member.issym() else None)
-    if fields.get('triggers') or fields.get('trigger'):
-        fail('cannot silently merge triggers from ' + path.name)
+    triggers = [pattern for value in fields.get('triggers', []) + fields.get('trigger', [])
+                for pattern in value.split()]
+    check_controls(scripts, triggers, path.name)
     return {
         'name': one(fields, 'pkgname'), 'version': one(fields, 'pkgver'),
         'arch': one(fields, 'arch'), 'license': fields.get('license', []),
         'depends': fields.get('depend', []), 'provides': fields.get('provides', []),
         'replaces': fields.get('replaces', []), 'url': one(fields, 'url', False),
         'origin': one(fields, 'origin', False), 'maintainer': one(fields, 'maintainer', False),
+        'scripts': scripts, 'triggers': triggers,
     }
 
 if stage.is_symlink() or not stage.is_dir() or archives.is_symlink() or not archives.is_dir():
@@ -1067,10 +1249,10 @@ with tempfile.TemporaryDirectory(prefix='runtime-merge-', dir=metadata) as tempo
             if linked['type'] != 'symlink': break
             target = target_path(target, linked['target'])
         if linked['type'] != 'file':
-            fail('runtime symlink must resolve to a regular library/license file')
+            fail('runtime symlink must resolve to a regular runtime file')
 
     providers = {}
-    dependency_re = re.compile(r'(!?)([A-Za-z0-9][A-Za-z0-9+_.:-]*)([<>=~]*)([^\s]*)')
+    dependency_re = re.compile(r'(!?)([A-Za-z0-9/][A-Za-z0-9+_.:/-]*)([<>=~]*)([^\s]*)')
     def dependency(value):
         match = dependency_re.fullmatch(value)
         if not match or bool(match[3]) != bool(match[4]):
@@ -1107,9 +1289,15 @@ with tempfile.TemporaryDirectory(prefix='runtime-merge-', dir=metadata) as tempo
             elif not satisfied:
                 fail('merged runtime does not satisfy its original dependency: ' + value)
     names = {p['name'] for p in packages}
+    replaces = set(names)
     for package in packages:
-        if any(dependency(value)[1] not in names for value in package['replaces']):
-            fail('original package replaces an unselected package: ' + package['name'])
+        for value in package['replaces']:
+            negative, replaced, operator, version = dependency(value)
+            if (negative or not re.fullmatch(r'[a-z0-9][a-z0-9+_.-]*', replaced) or
+                    replaced == 'immich' or any(replaced == p or replaced.startswith(p + '-')
+                    for p in ('musl', 'apk-tools', 'alpine-baselayout', 'busybox'))):
+                fail('unsafe original replacement: ' + value)
+            replaces.add(value)
     provides = sorted(name + ('=' + version if version else '') for name, version in providers.items())
     licenses = sorted({value for p in packages for value in p['license']})
     license_expression = 'AGPL-3.0-only' + ''.join(' AND (' + value + ')' for value in licenses)
@@ -1135,7 +1323,8 @@ with tempfile.TemporaryDirectory(prefix='runtime-merge-', dir=metadata) as tempo
         os.chown(destination, 0, 0, follow_symlinks=False)
         if record['type'] != 'symlink': os.chmod(destination, record['mode'])
 
-metadata_values = {'provides': provides, 'depends': sorted(depends), 'replaces': sorted(names), 'license': [license_expression]}
+metadata_values = {'provides': provides, 'depends': sorted(depends), 'replaces': sorted(replaces),
+                   'triggers': sorted({v for p in packages for v in p['triggers']}), 'license': [license_expression]}
 for filename, values in metadata_values.items():
     destination = metadata / filename
     if os.path.lexists(destination): fail('metadata output already exists: ' + filename)
@@ -1162,12 +1351,22 @@ import hashlib, json, os, posixpath, re, stat, sys
 root = Path(sys.argv[1])
 def fail(message): raise SystemExit('Invalid bundled runtime: ' + message)
 def allowed(path, directory=False):
-    if not isinstance(path, str) or not path or path.startswith('/') or '\\' in path: return False
+    if not isinstance(path, str) or not path or path.startswith('/') or '\\' in path:
+        return False
     parts = path.split('/')
-    if any(p in ('', '.', '..') or any(ord(c) < 32 or ord(c) == 127 for c in p) for p in parts): return False
-    if directory and path in ('usr', 'usr/lib', 'usr/share', 'usr/share/licenses'): return True
-    if not (path.startswith('usr/lib/') or path.startswith('usr/share/licenses/')): return False
-    if any(p in ('pkgconfig', 'cmake', '.cache', '.cargo', '.env', 'node_modules', 'home', 'backups') for p in parts): return False
+    if any(p in ('', '.', '..') or any(ord(c) < 32 or ord(c) == 127 for c in p) for p in parts):
+        return False
+    if any(p in ('pkgconfig', 'cmake', '.cache', '.cargo', '.env', 'node_modules', 'home', 'backups') for p in parts):
+        return False
+    # These are paths INSIDE verified runtime APKs, not directories copied from
+    # the builder. Keep executables, loader helpers, and their runtime data too.
+    roots = ('usr/bin', 'usr/lib', 'usr/libexec', 'usr/share/licenses',
+             'usr/share/glycin-loaders', 'usr/share/glycin', 'usr/share/mime',
+             'usr/share/locale', 'usr/share/thumbnailers', 'usr/share/vips')
+    if directory and any(path == root or root.startswith(path + '/') for root in roots):
+        return True
+    if not any(path.startswith(root + '/') for root in roots):
+        return False
     return not path.endswith(('.apk', '.a', '.la', '.tar', '.tar.gz'))
 manifest = root / 'usr/share/immich/bundled-runtime.json'
 for relative in ('usr', 'usr/share', 'usr/share/immich'):
@@ -1283,7 +1482,7 @@ require_cmd apk
 apk version --check "$APK_VERSION-r$APK_RELEASE" || fatal 'Invalid Alpine version. Set APK_VERSION explicitly (e.g. 3.2.0_rc1).'
 APK_ARCH="$(apk --print-arch)"
 case "$APK_ARCH" in x86_64|aarch64) ;; *) fatal "Unsupported architecture: $APK_ARCH" ;; esac
-ASSET_NAME="immich-alpine-3.24-$APK_ARCH.apk"
+ASSET_NAME="immich-alpine-${APK_VERSION}-r${APK_RELEASE}.apk"
 
 # Never run this build process against an actual installation.
 for marker in "$IMMICH_PATH/env" "$IMMICH_PATH/.immich-version" "$IMMICH_PATH/backups" "$IMMICH_PATH/.upgrade-pending"; do
@@ -1304,8 +1503,8 @@ if [[ "$MODE" != build-app ]]; then
   fi
   mkdir -p "$ARTIFACT_DIR"
   [[ ! -L "$ARTIFACT_DIR/runtime-apks" ]] || fatal 'Refusing a symlinked runtime APK output directory.'
-  # Also remove external runtime artifacts left by an older builder. Keep
-  # other architectures' assets intact when builds share an output directory.
+  # Also remove external runtime artifacts left by an older builder.
+  # Versioned APK filenames require separate output directories per architecture.
   remove_public_assets() {
     rm -f -- "$ARTIFACT_DIR/$ASSET_NAME" "$ARTIFACT_DIR/$ASSET_NAME.sha256" \
       "$ARTIFACT_DIR/$ASSET_NAME.pub" "$ARTIFACT_DIR/.$ASSET_NAME.partial" \
@@ -1695,7 +1894,7 @@ $RUNTIME_APK_VERSIONS
 binaryen=$BINARYEN_VERSION
 built_at=$BUILT_AT
 EOF
-# Complete means application paths validated, NOT that services were run.
+
 printf '%s\n' "$BUILT_AT" > "$APP/.build-complete"
 
 SUCCESS=1
