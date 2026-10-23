@@ -106,10 +106,27 @@ I have successfully upgraded from v3.3.1 to v3.3.5
 - `.github/workflows/build-immich.yml` builds immich for the current release and attaches the artifacts to the release.
 - `build-immich-alpine.sh` builds immich from source in an Alpine Linux container and generates a signed APK.
 
+## Uninstallation
+This removes immich and its runtime dependencies included in the APK. Running `apk del immich` isn't enough because these
+other APK dependencies are tied to it during installation.
+```bash
+apk del immich libraw vips ffmpeg7
+```
+
+> [!NOTE]
+> This will not delete the contents of your `/var/lib/immich/upload` or your `/var/lib/immich/env`. To delete them you have to do it manually so you can
+> backup or transfer your important data first.
+
 ## FAQ
 - **Q:** My install/upgrade failed and I want to restore.
 
 **A:** The backups are typically stored at `/var/lib/immich/backups`. You can manually move them back to `/var/lib/immich/app` or symlink if you're lazy.
+
+- **Q:** Why does this install a lot of dependencies during installation?
+
+**A:** These dependencies are required to run immich, and importantly: `libraw vips ffmpeg7`. These three aren't built here but are fetched from Alpine
+Linux's edge/community repository upstream. A mechanism in the APK installs them pre-packaged with `immich` so you don't have to add the edge repository.
+During uninstallation, it's also important to remove them so immich can be properly uninstalled.
 
 ## Verify the built APK using GitHub CLI (Attestation)
 First install GitHub CLI before running the command.
