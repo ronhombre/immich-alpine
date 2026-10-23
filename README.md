@@ -66,6 +66,50 @@ I have successfully upgraded from v3.3.1 to v3.3.5
 
 **A:** The backups are typically stored at `/var/lib/immich/backups`. You can manually move them back to `/var/lib/immich/app` or symlink if you're lazy.
 
+## Verify the built APK using GitHub CLI (Attestation)
+First install GitHub CLI before running the command.
+### Install and Login to GitHub CLI
+```bash
+apk update
+apk add github-cli
+
+gh auth login
+```
+
+### Run Attestation
+```bash
+gh attestation verify immich-alpine-3.3.5-r1.apk -R ronhombre/immich-alpine
+```
+
+### Example Attestation Output
+```
+~ # gh attestation verify immich-alpine-3.3.5-r1.apk -R ronhombre/immich-alpine
+Loaded digest sha256:f74da41b4d1e4344995216eef0fbe587018ce5630b455f3594a3e547c8766d90 for file://immich-alpine-3.3.5-r1.apk
+Loaded 1 attestation from GitHub API
+
+The following policy criteria will be enforced:
+- Predicate type must match:................ https://slsa.dev/provenance/v1
+- Source Repository Owner URI must match:... https://github.com/ronhombre
+- Source Repository URI must match:......... https://github.com/ronhombre/immich-alpine
+- Subject Alternative Name must match regex: (?i)^https://github\.com/ronhombre/immich-alpine/
+- OIDC Issuer must match:................... https://token.actions.githubusercontent.com
+
+✓ Verification succeeded!
+
+The following 1 attestation matched the policy criteria
+
+- Attestation #1
+  - Build repo:..... ronhombre/immich-alpine
+  - Build workflow:. .github/workflows/build-immich.yml@refs/heads/main
+  - Signer repo:.... ronhombre/immich-alpine
+  - Signer workflow: .github/workflows/build-immich.yml@refs/heads/main
+```
+This verifies the binary further that it's built openly using this repository and the `build-immich.yml` workflow.
+
+> [!CAUTION]
+> If this fails in any way, DO NOT INSTALL! You have been warned. All APK builds in the
+> [releases](https://github.com/ronhombre/immich-alpine/releases) page should always succeed.
+
 ## References
 - Heavily inspired by [arter97/immich-native](https://github.com/arter97/immich-native). I made this because I wanted to
 run Immich on Alpine Linux and reduce the memory footprint. I also hated having to build the server myself every time.
