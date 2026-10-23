@@ -1,8 +1,8 @@
 # immich-alpine
 Run immich server on Alpine Linux. No building required.
 
-This follows the immich versions for every x.y.z release. Support started from v3.3.5. Anything before that is not
-supported. Though, you are welcome to try them out, but it won't be as simple as running the install script.
+This follows the immich versions for every x.y.z release. Support started from v3.3.5. Anything before that is partially
+supported for before v3.3.5 and nothing before v3.2.0. You are welcome to try them out, but it won't be as simple as installing.
 
 > [!WARNING]
 > Versions `v3.2.0=>n<=v3.3.4` are pre-packaged as giant tar.gz and is now considered legacy. Please use the new install method below.
