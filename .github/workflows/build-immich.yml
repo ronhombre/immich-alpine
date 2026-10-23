@@ -43,6 +43,7 @@ on:
 # APK_DESCRIPTION and APK_URL repository variables may customize those public
 # metadata fields. When empty, the builder uses its Immich defaults.
 permissions:
+  id-token: write
   contents: write
   attestations: write
 
@@ -145,7 +146,7 @@ jobs:
             --repository https://dl-cdn.alpinelinux.org/alpine/edge/community \
             vips vips-cpp vips-dev vips-jxl libraw libraw-dev
 
-      - name: Build and optionally sign APK
+      - name: Build and Sign APK
         id: build
         env:
           IMMICH_REV: ${{ steps.rev.outputs.immich_rev }}
@@ -189,6 +190,12 @@ jobs:
           export ARTIFACT_DIR
           bash ./build-immich-alpine.sh "${signing_args[@]}"
 
+      - name: Verify Built APK
+        id: build_verify
+        env:
+          SIGNING_DIR: ${{ steps.build.outputs.signing_dir }}
+          ARTIFACT_DIR: ${{ steps.build.outputs.ARTIFACT_DIR }}
+        run: |
           arch="$(apk --print-arch)"
           case "$arch" in
             x86_64|aarch64) ;;
@@ -227,14 +234,14 @@ jobs:
             require_output_file "$ARTIFACT_DIR/$asset.pub"
             # Verify with the supplied key's public half, without allowing an
             # unsigned package or relying on unrelated system-trusted keys.
-            mkdir -m 0700 "$signing_dir/verification-keys"
-            openssl pkey -in "$signing_dir/immich.rsa" -passin pass: -pubout \
-              -out "$signing_dir/verification-keys/immich.rsa.pub"
-            if ! cmp -s "$signing_dir/verification-keys/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"; then
+            mkdir -m 0700 "$SIGNING_DIR/verification-keys"
+            openssl pkey -in "$SIGNING_DIR/immich.rsa" -passin pass: -pubout \
+              -out "$SIGNING_DIR/verification-keys/immich.rsa.pub"
+            if ! cmp -s "$SIGNING_DIR/verification-keys/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"; then
               echo "::error::Published public key does not match APK_SIGNING_KEY." >&2
               exit 1
             fi
-            if ! apk verify --keys-dir "$signing_dir/verification-keys" "$ARTIFACT_DIR/$asset"; then
+            if ! apk verify --keys-dir "$SIGNING_DIR/verification-keys" "$ARTIFACT_DIR/$asset"; then
               echo "::error::APK signature verification failed for $asset." >&2
               exit 1
             fi
