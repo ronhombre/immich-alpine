@@ -44,6 +44,7 @@ apk add /tmp/immich-alpine-latest.apk
 ```
 
 ## Advanced Installation (and Upgrading)
+I recommend doing this advanced installation so future upgrades can be done using `apk upgrade`
 **wget**
 ```bash
 # Add and trust this repository's APK public key
@@ -52,11 +53,11 @@ wget -O /etc/apk/keys/immich-alpine.pub \
   https://raw.githubusercontent.com/ronhombre/immich-alpine/refs/heads/main/key/immich-alpine.pub
 chmod 0644 /etc/apk/keys/immich-alpine.pub
 
-# Download and Install APK
-wget -O /tmp/immich-alpine-latest.apk \
-  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+# Add Immich Alpine repository
+echo "v3 https://immich.hombre.asia/v3.24/releases" \
+  >> /etc/apk/repositories
 
-apk add /tmp/immich-alpine-latest.apk
+apk add immich
 
 # In the future, you don't have to download the public key again.
 ```
@@ -69,12 +70,11 @@ curl -fsSL \
   -o /etc/apk/keys/immich-alpine.pub
 chmod 0644 /etc/apk/keys/immich-alpine.pub
 
-# Download and Install APK
-curl -fL --retry 3 \
-  -o /tmp/immich-alpine-latest.apk \
-  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+# Add Immich Alpine repository
+echo "v3 https://immich.hombre.asia/v3.24/releases" \
+  >> /etc/apk/repositories
 
-apk add /tmp/immich-alpine-latest.apk
+apk add immich
 
 # In the future, you don't have to download the public key again.
 ```
