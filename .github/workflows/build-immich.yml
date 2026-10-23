@@ -181,6 +181,11 @@ jobs:
           # The root builder reads the file only while packaging. Do not pass
           # the secret value to upstream source/dependency build processes.
           unset APK_SIGNING_KEY_PEM
+          # Give this invocation its own output directory. Artifact discovery
+          # below must not pick up an APK left by an earlier build.
+          mkdir -p -- "$ARTIFACT_DIR"
+          ARTIFACT_DIR="$(mktemp -d "$ARTIFACT_DIR/build.XXXXXXXX")"
+          export ARTIFACT_DIR
           bash ./build-immich-alpine.sh "${signing_args[@]}"
 
           arch="$(apk --print-arch)"
@@ -188,28 +193,57 @@ jobs:
             x86_64|aarch64) ;;
             *) echo "ERROR: Unsupported artifact architecture: $arch" >&2; exit 1 ;;
           esac
-          asset="immich-alpine-${APK_VERSION}-r${APK_RELEASE}.apk"
+          # APK_VERSION may be blank here: the builder resolves it in a child
+          # process. Use the actual output instead of reconstructing its name.
+          shopt -s nullglob
+          apk_files=("$ARTIFACT_DIR"/*.apk)
+          shopt -u nullglob
+          if (( ${#apk_files[@]} != 1 )); then
+            echo "ERROR: Expected one Immich APK, found ${#apk_files[@]} in $ARTIFACT_DIR." >&2
+            exit 1
+          fi
+          asset="${apk_files[0]##*/}"
+          if [[ ! "$asset" =~ ^immich-alpine-[0-9][A-Za-z0-9._+]*-r[0-9]+\.apk$ ]]; then
+            echo "ERROR: Unexpected APK filename: $asset (expected immich-alpine-VERSION-rREVISION.apk)." >&2
+            exit 1
+          fi
+          echo "Checking generated APK: $asset"
+          require_output_file() {
+            if [[ ! -f "$1" || -L "$1" || ! -s "$1" ]]; then
+              echo "::error::Missing, empty, or symlinked build output: $1" >&2
+              exit 1
+            fi
+          }
           for file in "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256"; do
-            [[ -f "$file" && ! -L "$file" && -s "$file" ]]
+            require_output_file "$file"
           done
-          (cd "$ARTIFACT_DIR" && sha256sum -c "$asset.sha256")
+          if ! (cd "$ARTIFACT_DIR" && sha256sum -c "$asset.sha256"); then
+            echo "::error::Checksum verification failed for $asset." >&2
+            exit 1
+          fi
           output_files=("$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256")
           if (( ${#signing_args[@]} )); then
-            [[ -f "$ARTIFACT_DIR/$asset.pub" && ! -L "$ARTIFACT_DIR/$asset.pub" && -s "$ARTIFACT_DIR/$asset.pub" ]]
+            require_output_file "$ARTIFACT_DIR/$asset.pub"
             # Verify with the supplied key's public half, without allowing an
             # unsigned package or relying on unrelated system-trusted keys.
             mkdir -m 0700 "$signing_dir/verification-keys"
             openssl pkey -in "$signing_dir/immich.rsa" -passin pass: -pubout \
               -out "$signing_dir/verification-keys/immich.rsa.pub"
-            cmp -s "$signing_dir/verification-keys/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"
-            apk verify --keys-dir "$signing_dir/verification-keys" "$ARTIFACT_DIR/$asset"
+            if ! cmp -s "$signing_dir/verification-keys/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"; then
+              echo "::error::Published public key does not match APK_SIGNING_KEY." >&2
+              exit 1
+            fi
+            if ! apk verify --keys-dir "$signing_dir/verification-keys" "$ARTIFACT_DIR/$asset"; then
+              echo "::error::APK signature verification failed for $asset." >&2
+              exit 1
+            fi
             output_files+=("$ARTIFACT_DIR/$asset.pub")
           fi
 
-          # Runtime library files belong to the main APK. Publish only these two
-          # or three named files, including when old build outputs still exist.
+          # Runtime library files belong to the main APK. Publish only the
+          # verified APK, checksum, and optional public key from this build.
           {
-            printf 'arch=%s\nfiles<<IMMICH_APK_FILES\n' "$arch"
+            printf 'arch=%s\nartifact_name=%s\nfiles<<IMMICH_APK_FILES\n' "$arch" "${asset%.apk}"
             printf '%s\n' "${output_files[@]}"
             printf 'IMMICH_APK_FILES\n'
           } >> "$GITHUB_OUTPUT"
@@ -237,7 +271,7 @@ jobs:
         if: steps.rev.outputs.release_tag == ''
         uses: actions/upload-artifact@v4
         with:
-          name: immich-alpine-3.24-${{ steps.build.outputs.arch }}
+          name: ${{ steps.build.outputs.artifact_name }}
           path: ${{ steps.build.outputs.files }}
           if-no-files-found: error
           retention-days: 30
