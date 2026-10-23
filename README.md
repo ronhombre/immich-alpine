@@ -9,17 +9,58 @@ supported for before v3.3.5 and nothing before v3.2.0. You are welcome to try th
 
 ## Quick Installation (and Upgrading)
 ### Insecure Method
+**wget**
 ```bash
-curl -LO https://github.com/ronhombre/immich-alpine/releases/download/v3.3.5/immich-alpine-3.3.5-r1.apk && apk add immich-alpine-3.3.5-r1.apk --allow-untrusted
+wget -O /tmp/immich-alpine-latest.apk \
+  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+
+apk add /tmp/immich-alpine-latest.apk --allow-untrusted
+```
+**curl**
+```bash
+curl -fL --retry 3 \
+  -o /tmp/immich-alpine-latest.apk \
+  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+
+apk add /tmp/immich-alpine-latest.apk --allow-untrusted
 ```
 ### Secure Method
 Please make sure you already have the public key installed. If not, check it below.
+
+**wget**
 ```bash
-curl -LO https://github.com/ronhombre/immich-alpine/releases/download/v3.3.5/immich-alpine-3.3.5-r1.apk && apk add immich-alpine-3.3.5-r1.apk
+wget -O /tmp/immich-alpine-latest.apk \
+  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+
+apk add /tmp/immich-alpine-latest.apk
+```
+**curl**
+```bash
+curl -fL --retry 3 \
+  -o /tmp/immich-alpine-latest.apk \
+  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+
+apk add /tmp/immich-alpine-latest.apk
 ```
 
 ## Advanced Installation (and Upgrading)
+**wget**
+```bash
+# Add and trust this repository's APK public key
+mkdir -p /etc/apk/keys
+wget -O /etc/apk/keys/immich-alpine.pub \
+  https://raw.githubusercontent.com/ronhombre/immich-alpine/refs/heads/main/key/immich-alpine.pub
+chmod 0644 /etc/apk/keys/immich-alpine.pub
 
+# Download and Install APK
+wget -O /tmp/immich-alpine-latest.apk \
+  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+
+apk add /tmp/immich-alpine-latest.apk
+
+# In the future, you don't have to download the public key again.
+```
+**curl**
 ```bash
 # Add and trust this repository's APK public key
 mkdir -p /etc/apk/keys
@@ -28,9 +69,12 @@ curl -fsSL \
   -o /etc/apk/keys/immich-alpine.pub
 chmod 0644 /etc/apk/keys/immich-alpine.pub
 
-# Install APK
-curl -LO https://github.com/ronhombre/immich-alpine/releases/download/v3.3.5/immich-alpine-3.3.5-r1.apk \
-  && apk add immich-alpine-3.3.5-r1.apk
+# Download and Install APK
+curl -fL --retry 3 \
+  -o /tmp/immich-alpine-latest.apk \
+  https://immich.hombre.asia/v3.24/releases/x86_64/immich-alpine-latest.apk
+
+apk add /tmp/immich-alpine-latest.apk
 
 # In the future, you don't have to download the public key again.
 ```

@@ -76,6 +76,10 @@ Outputs (architecture remains in the package metadata):
   $ARTIFACT_DIR/immich-alpine-<version>-r<revision>.apk
   $ARTIFACT_DIR/immich-alpine-<version>-r<revision>.apk.sha256
   $ARTIFACT_DIR/immich-alpine-<version>-r<revision>.apk.pub  (only when signed)
+  $ARTIFACT_DIR/immich-alpine.rsa.pub                (stable public key, signed builds)
+  $ARTIFACT_DIR/Packages.adb                        (native APKv3 repository index)
+  $ARTIFACT_DIR/Packages.adb.sha256
+  The Cloudflare Worker must serve Packages.adb for apk v3 repositories.
   Use separate ARTIFACT_DIR values when building multiple architectures.
 
 Required newer runtime files are part of the Immich APK itself. The package
@@ -85,6 +89,9 @@ Native APK hooks create the account/configuration, enable OpenRC services, and
 handle service state and application/configuration backups on upgrades.
 There are no nested dependency APKs or separate dependency release assets.
 Ordinary dependencies come from Alpine 3.24 stable repositories.
+The published APK's internal name remains "immich"; the APKv3 repository
+index uses ${arch}/${name}-alpine-${version}.apk so apk add immich resolves
+our immich-alpine-<version>.apk release asset correctly.
 
 With no key, the package is unsigned; installation requires an explicit
 apk add --allow-untrusted. Signed installs require the matching public key
@@ -1034,22 +1041,41 @@ PY
     --script "post-deinstall:$scripts/post-deinstall" \
     --output "$PKG_WORK/$ASSET_NAME" "${metadata_args[@]}" "${signing_args[@]}"
   verify_apk "$PKG_WORK/$ASSET_NAME" "${verify_args[@]}"
-  # Runtime files are already inside the signed payload. Publish one APK only.
+  # apk index creates a *legacy v2* index and cannot index our native APKv3.
+  # For native Alpine 3.24 repositories, generate and sign Packages.adb instead.
+  # The custom name-spec maps internal package "immich" to the published
+  # "immich-alpine-<version>.apk" filename while keeping the architecture
+  # directory in the URL (e.g. /v3.24/releases/x86_64/<filename>).
+  log 'Creating APKv3 repository index (Packages.adb)...'
+  apk mkndx --allow-untrusted \
+    --description "Immich Alpine 3.24 ($IMMICH_REV)" \
+    --pkgname-spec '${arch}/${name}-alpine-${version}.apk' \
+    --output "$PKG_WORK/Packages.adb" \
+    "${signing_args[@]}" "$PKG_WORK/$ASSET_NAME"
+  apk verify "${verify_args[@]}" "$PKG_WORK/Packages.adb"
+  # Runtime files are inside the signed APK; publish one APK and its index.
   if [[ -n "$APK_SIGNING_KEY" ]]; then
     install -m 0644 "$PKG_WORK/keys/$ASSET_NAME.pub" "$ARTIFACT_DIR/$ASSET_NAME.pub"
+    # Stable name for configuring /etc/apk/keys across subsequent releases.
+    install -m 0644 "$PKG_WORK/keys/$ASSET_NAME.pub" "$ARTIFACT_DIR/immich-alpine.rsa.pub"
   fi
   install -m 0644 "$PKG_WORK/$ASSET_NAME" "$ARTIFACT_DIR/.$ASSET_NAME.partial"
   mv -- "$ARTIFACT_DIR/.$ASSET_NAME.partial" "$ARTIFACT_DIR/$ASSET_NAME"
+  install -m 0644 "$PKG_WORK/Packages.adb" "$ARTIFACT_DIR/.Packages.adb.partial"
+  mv -- "$ARTIFACT_DIR/.Packages.adb.partial" "$ARTIFACT_DIR/Packages.adb"
   (
     cd "$ARTIFACT_DIR"
     sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256"
+    sha256sum Packages.adb > Packages.adb.sha256
     sha256sum -c "$ASSET_NAME.sha256"
+    sha256sum -c Packages.adb.sha256
   )
   PUBLISH_SUCCESS=1
   log "Build successful: $IMMICH_REV ($source_sha), APK $APK_VERSION-r$APK_RELEASE [$APK_ARCH]"
   log "Release asset: $ARTIFACT_DIR/$ASSET_NAME"
-  log "Checksum: $ARTIFACT_DIR/$ASSET_NAME.sha256"
-  [[ -z "$APK_SIGNING_KEY" ]] || log "Public key: $ARTIFACT_DIR/$ASSET_NAME.pub"
+  log "Repository index: $ARTIFACT_DIR/Packages.adb"
+  log "Checksums: $ARTIFACT_DIR/$ASSET_NAME.sha256, $ARTIFACT_DIR/Packages.adb.sha256"
+  [[ -z "$APK_SIGNING_KEY" ]] || log "Public key: $ARTIFACT_DIR/immich-alpine.rsa.pub"
 }
 
 # Merge verified original runtime payloads into a single native Immich package.
@@ -1518,6 +1544,9 @@ valid_ref "$IMMICH_REV" || fatal 'Unsafe IMMICH_REV.'
 [[ "$ARTIFACT_DIR" = /* ]] || fatal 'ARTIFACT_DIR must be an absolute path.'
 [[ "$APK_RELEASE" =~ ^(0|[1-9][0-9]*)$ ]] || fatal 'APK_RELEASE must be a nonnegative integer.'
 APK_VERSION="${APK_VERSION:-${IMMICH_REV#v}}"
+# The Worker versioned-APK regex cannot match '+' or '-' within a version.
+[[ "$APK_VERSION" =~ ^[0-9][A-Za-z0-9._]*$ ]] || \
+  fatal 'APK_VERSION must use digits, letters, dots or underscores to match the Cloudflare Worker filename regex.'
 
 [[ ! -L "$IMMICH_PATH" && ! -L "$HOME_DIR" && ! -L "$APP" ]] || fatal 'Refusing symlinked build root/home/app path.'
 [[ -f /etc/alpine-release ]] || fatal 'Builder must run on Alpine Linux.'
@@ -1553,7 +1582,10 @@ if [[ "$MODE" != build-app ]]; then
   # Versioned APK filenames require separate output directories per architecture.
   remove_public_assets() {
     rm -f -- "$ARTIFACT_DIR/$ASSET_NAME" "$ARTIFACT_DIR/$ASSET_NAME.sha256" \
-      "$ARTIFACT_DIR/$ASSET_NAME.pub" "$ARTIFACT_DIR/.$ASSET_NAME.partial" \
+      "$ARTIFACT_DIR/$ASSET_NAME.pub" "$ARTIFACT_DIR/immich-alpine.rsa.pub" \
+      "$ARTIFACT_DIR/.$ASSET_NAME.partial" \
+      "$ARTIFACT_DIR/Packages.adb" "$ARTIFACT_DIR/Packages.adb.sha256" \
+      "$ARTIFACT_DIR/.Packages.adb.partial" \
       "$ARTIFACT_DIR/$ASSET_NAME.runtime-apks.sha256" \
       "$ARTIFACT_DIR/runtime-apks/"*".$APK_ARCH.apk"
   }

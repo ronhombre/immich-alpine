@@ -82,6 +82,7 @@ jobs:
           EVENT_RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_IMMICH_REV: ${{ inputs.immich_rev }}
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_APK_VERSION: ${{ inputs.apk_version }}
         run: |
           set -Eeuo pipefail
           if [[ "$EVENT_NAME" == release ]]; then
@@ -99,6 +100,15 @@ jobs:
             echo 'ERROR: Invalid GitHub release tag.' >&2
             exit 1
           }
+          # The Worker's fast path constructs v<version> from the APK filename.
+          # Other GitHub tag styles would produce broken versioned download URLs.
+          if [[ -n "$release_tag" ]]; then
+            package_version="${INPUT_APK_VERSION:-${immich_rev#v}}"
+            if [[ ! "$release_tag" =~ ^v[0-9][A-Za-z0-9._]*$ || "$release_tag" != "v$package_version" ]]; then
+              echo "::error::Release tag '$release_tag' must exactly equal v<APK_VERSION> ('v$package_version') for Cloudflare versioned APK URLs." >&2
+              exit 1
+            fi
+          fi
           printf 'immich_rev=%s\nrelease_tag=%s\n' "$immich_rev" "$release_tag" >> "$GITHUB_OUTPUT"
 
       - name: Check APK signing configuration
@@ -213,6 +223,7 @@ jobs:
           VERIFICATION_KEYS_DIR: ${{ steps.build.outputs.verification_keys_dir }}
           APK_SIGNED: ${{ steps.build.outputs.signed }}
           ARTIFACT_DIR: ${{ steps.build.outputs.artifact_dir }}
+          RELEASE_TAG: ${{ steps.rev.outputs.release_tag }}
         run: |
           set -Eeuo pipefail
           if [[ "$ARTIFACT_DIR" != /* || "$ARTIFACT_DIR" == / || ! -d "$ARTIFACT_DIR" || -L "$ARTIFACT_DIR" ]]; then
@@ -242,25 +253,35 @@ jobs:
             exit 1
           fi
           asset="${apk_files[0]##*/}"
-          if [[ ! "$asset" =~ ^immich-alpine-[0-9][A-Za-z0-9._+]*-r[0-9]+\.apk$ ]]; then
+          if [[ ! "$asset" =~ ^immich-alpine-([0-9][A-Za-z0-9._]*)-r[0-9]+\.apk$ ]]; then
             echo "ERROR: Unexpected APK filename: $asset (expected immich-alpine-VERSION-rREVISION.apk)." >&2
             exit 1
           fi
-          echo "Checking generated APK: $asset"
+          # Assert the actual package filename, not only the manual inputs,
+          # matches the v<version> GitHub tag used by the Worker's 302 fast path.
+          package_version="${BASH_REMATCH[1]}"
+          if [[ -n "$RELEASE_TAG" && "$RELEASE_TAG" != "v$package_version" ]]; then
+            echo "::error::Release tag '$RELEASE_TAG' does not match APK '$asset'; the Worker would redirect to a non-existent tag." >&2
+            exit 1
+          fi
+          echo "Checking generated APK and native index: $asset"
           require_output_file() {
             if [[ ! -f "$1" || -L "$1" || ! -s "$1" ]]; then
               echo "::error::Missing, empty, or symlinked build output: $1" >&2
               exit 1
             fi
           }
-          for file in "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256"; do
+          for file in "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256" \
+                      "$ARTIFACT_DIR/Packages.adb" "$ARTIFACT_DIR/Packages.adb.sha256"; do
             require_output_file "$file"
           done
-          if ! (cd "$ARTIFACT_DIR" && sha256sum -c "$asset.sha256"); then
-            echo "::error::Checksum verification failed for $asset." >&2
+          if ! (cd "$ARTIFACT_DIR" && sha256sum -c "$asset.sha256" && sha256sum -c Packages.adb.sha256); then
+            echo "::error::Checksum verification failed for APK or Packages.adb." >&2
             exit 1
           fi
-          output_files=("$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256")
+          # Publish both the APKv3 package and its signed APKv3 index.
+          output_files=("$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256" \
+                        "$ARTIFACT_DIR/Packages.adb" "$ARTIFACT_DIR/Packages.adb.sha256")
           if [[ "$APK_SIGNED" == true ]]; then
             if [[ "$VERIFICATION_KEYS_DIR" != /tmp/immich-apk-verify.* || ! -d "$VERIFICATION_KEYS_DIR" || -L "$VERIFICATION_KEYS_DIR" ]]; then
               echo '::error::Expected public verification-key directory is missing or invalid.' >&2
@@ -268,27 +289,30 @@ jobs:
             fi
             require_output_file "$VERIFICATION_KEYS_DIR/immich.rsa.pub"
             require_output_file "$ARTIFACT_DIR/$asset.pub"
-            # Trust the key derived from the secret, not merely the key shipped
-            # beside the package. The private key has already been deleted.
-            if ! cmp -s "$VERIFICATION_KEYS_DIR/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"; then
+            require_output_file "$ARTIFACT_DIR/immich-alpine.rsa.pub"
+            # Trust the key derived from the secret, not merely the published copy.
+            if ! cmp -s "$VERIFICATION_KEYS_DIR/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub" || \
+               ! cmp -s "$VERIFICATION_KEYS_DIR/immich.rsa.pub" "$ARTIFACT_DIR/immich-alpine.rsa.pub"; then
               echo '::error::Published public key does not match APK_SIGNING_KEY.' >&2
               exit 1
             fi
-            if ! apk verify --keys-dir "$VERIFICATION_KEYS_DIR" "$ARTIFACT_DIR/$asset"; then
-              echo "::error::APK signature verification failed for $asset." >&2
+            if ! apk verify --keys-dir "$VERIFICATION_KEYS_DIR" \
+                "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/Packages.adb"; then
+              echo '::error::APK or repository index signature verification failed.' >&2
               exit 1
             fi
-            output_files+=("$ARTIFACT_DIR/$asset.pub")
+            output_files+=("$ARTIFACT_DIR/$asset.pub" "$ARTIFACT_DIR/immich-alpine.rsa.pub")
           else
             # Unsigned artifact-only builds still need an integrity check.
-            if ! apk verify --allow-untrusted "$ARTIFACT_DIR/$asset"; then
-              echo "::error::Unsigned APK integrity verification failed for $asset." >&2
+            if ! apk verify --allow-untrusted \
+                "$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/Packages.adb"; then
+              echo '::error::Unsigned APK or repository index integrity verification failed.' >&2
               exit 1
             fi
           fi
 
-          # Runtime library files belong to the main APK. Publish only the
-          # verified APK, checksum, and optional public key from this build.
+          # Runtime libraries are in the APK. A Worker-compatible release adds
+          # the v3 index plus checksums and the stable trusted key (if signed).
           {
             printf 'arch=%s\nartifact_name=%s\nfiles<<IMMICH_APK_FILES\n' "$arch" "${asset%.apk}"
             printf '%s\n' "${output_files[@]}"
