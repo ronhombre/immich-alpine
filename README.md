@@ -1,37 +1,44 @@
 # immich-alpine
 Run immich server on Alpine Linux. No building required.
 
-This follows the immich versions for every x.y.z release. Support started from v3.2.0. Anything before that is not
+This follows the immich versions for every x.y.z release. Support started from v3.3.5. Anything before that is not
 supported. Though, you are welcome to try them out, but it won't be as simple as running the install script.
 
 > [!WARNING]
-> I have validated that this works, but I have not tested it extensively. I do not make any guarantees. Please test and
-> let me know if you find any issues, or not. (tell me it works fine please!)
-
-> [!NOTE]
-> I have tested the upgrade path. Simply re-run the install script and it will upgrade the server. You may need to
-> extend the file system since the new files basically double the storage size used. (P.S. I had to increase mine from
-> 2.25GB to 8GB. This should be fine for most people since most hypervisors only use storage that's actually used by
-> the VMs and the CTs.)
+> Versions `v3.2.0=>n<=v3.3.4` are pre-packaged as giant tar.gz and is now considered legacy. Please use the new install method below.
 
 ## Quick Installation (and Upgrading)
+### Insecure Method
 ```bash
-wget -qO install-immich-alpine.sh https://raw.githubusercontent.com/ronhombre/immich-alpine/main/install-immich-alpine.sh && bash install-immich-alpine.sh
+curl -LO https://github.com/ronhombre/immich-alpine/releases/download/v3.3.5/immich-alpine-3.3.5-r1.apk && apk add immich-alpine-3.3.5-r1.apk --allow-untrusted
 ```
-
-This automatically installs (and upgrades to) the latest version [release](https://github.com/ronhombre/immich-alpine/releases).
+### Secure Method
+Please make sure you already have the public key installed. If not, check it below.
+```bash
+curl -LO https://github.com/ronhombre/immich-alpine/releases/download/v3.3.5/immich-alpine-3.3.5-r1.apk && apk add immich-alpine-3.3.5-r1.apk
+```
 
 ## Advanced Installation (and Upgrading)
 
 ```bash
-# Download the install script
-wget -O install-immich-alpine.sh \
-  https://raw.githubusercontent.com/ronhombre/immich-alpine/main/install-immich-alpine.sh
-chmod +x install-immich-alpine.sh
+# Add and trust this repository's APK public key
+mkdir -p /etc/apk/keys
+curl -fsSL \
+  'https://raw.githubusercontent.com/ronhombre/immich-alpine/refs/heads/main/key/immich-alpine.pub' \
+  -o /etc/apk/keys/immich-alpine.pub
+chmod 0644 /etc/apk/keys/immich-alpine.pub
 
-# Install a specific release (starting from v3.2.0). Check latest version in https://github.com/ronhombre/immich-alpine/releases
-./install-immich-alpine.sh v3.2.4 ronhombre/immich-alpine
+# Install APK
+curl -LO https://github.com/ronhombre/immich-alpine/releases/download/v3.3.5/immich-alpine-3.3.5-r1.apk \
+  && apk add immich-alpine-3.3.5-r1.apk
+
+# In the future, you don't have to download the public key again.
 ```
+
+The purpose of this public key is for you to maintain a consistent validation of trust between you and me, the maintainer
+of this package method. You should be able to validate implicitly that the APK genuinely comes from me and is most likely
+built using GitHub Actions and is not implanted with malware. You are also free to not install the public key as long as
+you understand the risks.
 
 ## Example (Working)
 ![proxmox-sample-ct.png](proxmox-sample-ct.png)![proxmox-sample-ct-idle.png](proxmox-sample-ct-idle.png)
@@ -48,18 +55,11 @@ project for a future me.
 ## Example (Upgrade path)
 ![upgrade-verified.png](upgrade-verified.png)
 
-I have successfully upgraded from v3.2.0 to v3.2.2.
-
-### Issues I encountered
-- I also mounted the ML cache as a 2GB volume. Remember to set `chown immich:immich /var/lib/immich/cache` because I
-forgot and that was a headache of its own.
-- I had to avoid using my pgbouncer backend because its transaction pooling mode conflicts with the way immich locks the
-sessions. I had to open up my database VM's firewall just for that. (P.S. I have verifySSL enabled)
+I have successfully upgraded from v3.3.1 to v3.3.5
 
 ## How this works
 - `.github/workflows/build-immich.yml` builds immich for the current release and attaches the artifacts to the release.
-- `build-immich-alpine.sh` builds immich from source in an Alpine Linux container.
-- `install-immich-alpine.sh` is an install script that downloads the artifacts from the release and sets it up locally.
+- `build-immich-alpine.sh` builds immich from source in an Alpine Linux container and generates a signed APK.
 
 ## FAQ
 - **Q:** My install/upgrade failed and I want to restore.
