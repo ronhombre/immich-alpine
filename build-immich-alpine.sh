@@ -694,12 +694,13 @@ health_url() {
     printf 'http://%s:%s%s' "$host" "$port" "$4"
 }
 check_restarted_services() {
+    echo 'Waiting for Immich services to come online. Timeout in 120s'
     server_url=''
     ml_url=''
     if [ "$restart_server" = 1 ]; then server_url=$(health_url IMMICH_HOST IMMICH_PORT 2283 /api/server/ping); fi
     if [ "$restart_ml" = 1 ]; then ml_url=$(health_url MACHINE_LEARNING_HOST MACHINE_LEARNING_PORT 3003 /ping); fi
     attempt=0
-    while [ "$attempt" -lt 30 ]; do
+    while [ "$attempt" -lt 60 ]; do
         healthy=1
         if [ "$restart_ml" = 1 ]; then
             running immich-ml && curl --silent --show-error --fail --max-time 3 --output /dev/null "$ml_url" 2>/dev/null || healthy=0
