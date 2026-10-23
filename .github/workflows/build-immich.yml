@@ -44,6 +44,7 @@ on:
 # metadata fields. When empty, the builder uses its Immich defaults.
 permissions:
   contents: write
+  attestations: write
 
 jobs:
   build:
@@ -256,6 +257,11 @@ jobs:
           if [[ "$SIGNING_DIR" == /tmp/immich-apk-signing.* ]]; then
             rm -rf -- "$SIGNING_DIR"
           fi
+
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.build.outputs.files }}
 
       - name: Upload APK to GitHub Release
         if: steps.rev.outputs.release_tag != ''
