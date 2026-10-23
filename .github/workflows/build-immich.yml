@@ -169,16 +169,32 @@ jobs:
             exit 1
           fi
           signing_dir=''
+          verification_keys_dir=''
+          signed=false
           signing_args=()
           cleanup_signing() {
-            [[ -z "$signing_dir" ]] || rm -rf -- "$signing_dir"
+            local status=$?
+            trap - EXIT
+            if [[ -n "$signing_dir" ]]; then
+              if ! rm -rf -- "$signing_dir"; then
+                echo '::error::Could not remove the temporary private signing key.' >&2
+                status=1
+              fi
+            fi
+            exit "$status"
           }
           trap cleanup_signing EXIT
           if [[ -n "${APK_SIGNING_KEY_PEM//[[:space:]]/}" ]]; then
             signing_dir="$(mktemp -d /tmp/immich-apk-signing.XXXXXXXX)"
             printf 'signing_dir=%s\n' "$signing_dir" >> "$GITHUB_OUTPUT"
             (umask 077; printf '%s\n' "$APK_SIGNING_KEY_PEM" > "$signing_dir/immich.rsa")
+            # Keep an independently derived PUBLIC key for the next step.
+            verification_keys_dir="$(mktemp -d /tmp/immich-apk-verify.XXXXXXXX)"
+            printf 'verification_keys_dir=%s\n' "$verification_keys_dir" >> "$GITHUB_OUTPUT"
+            openssl pkey -in "$signing_dir/immich.rsa" -passin pass: -pubout \
+              -out "$verification_keys_dir/immich.rsa.pub"
             signing_args=(--signing-key "$signing_dir/immich.rsa")
+            signed=true
           fi
           # The root builder reads the file only while packaging. Do not pass
           # the secret value to upstream source/dependency build processes.
@@ -189,13 +205,28 @@ jobs:
           ARTIFACT_DIR="$(mktemp -d "$ARTIFACT_DIR/build.XXXXXXXX")"
           export ARTIFACT_DIR
           bash ./build-immich-alpine.sh "${signing_args[@]}"
+          printf 'artifact_dir=%s\nsigned=%s\n' "$ARTIFACT_DIR" "$signed" >> "$GITHUB_OUTPUT"
 
       - name: Verify Built APK
         id: build_verify
         env:
-          SIGNING_DIR: ${{ steps.build.outputs.signing_dir }}
-          ARTIFACT_DIR: ${{ steps.build.outputs.ARTIFACT_DIR }}
+          VERIFICATION_KEYS_DIR: ${{ steps.build.outputs.verification_keys_dir }}
+          APK_SIGNED: ${{ steps.build.outputs.signed }}
+          ARTIFACT_DIR: ${{ steps.build.outputs.artifact_dir }}
         run: |
+          set -Eeuo pipefail
+          if [[ "$ARTIFACT_DIR" != /* || "$ARTIFACT_DIR" == / || ! -d "$ARTIFACT_DIR" || -L "$ARTIFACT_DIR" ]]; then
+            echo '::error::Build step did not return a valid artifact directory.' >&2
+            exit 1
+          fi
+          case "$APK_SIGNED" in
+            true|false) ;;
+            *) echo '::error::Build step did not return a valid signing status.' >&2; exit 1 ;;
+          esac
+          if [[ "$REQUIRE_APK_SIGNING" == true && "$APK_SIGNED" != true ]]; then
+            echo '::error::Refusing to publish an unsigned release APK.' >&2
+            exit 1
+          fi
           arch="$(apk --print-arch)"
           case "$arch" in
             x86_64|aarch64) ;;
@@ -230,22 +261,30 @@ jobs:
             exit 1
           fi
           output_files=("$ARTIFACT_DIR/$asset" "$ARTIFACT_DIR/$asset.sha256")
-          if (( ${#signing_args[@]} )); then
-            require_output_file "$ARTIFACT_DIR/$asset.pub"
-            # Verify with the supplied key's public half, without allowing an
-            # unsigned package or relying on unrelated system-trusted keys.
-            mkdir -m 0700 "$SIGNING_DIR/verification-keys"
-            openssl pkey -in "$SIGNING_DIR/immich.rsa" -passin pass: -pubout \
-              -out "$SIGNING_DIR/verification-keys/immich.rsa.pub"
-            if ! cmp -s "$SIGNING_DIR/verification-keys/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"; then
-              echo "::error::Published public key does not match APK_SIGNING_KEY." >&2
+          if [[ "$APK_SIGNED" == true ]]; then
+            if [[ "$VERIFICATION_KEYS_DIR" != /tmp/immich-apk-verify.* || ! -d "$VERIFICATION_KEYS_DIR" || -L "$VERIFICATION_KEYS_DIR" ]]; then
+              echo '::error::Expected public verification-key directory is missing or invalid.' >&2
               exit 1
             fi
-            if ! apk verify --keys-dir "$SIGNING_DIR/verification-keys" "$ARTIFACT_DIR/$asset"; then
+            require_output_file "$VERIFICATION_KEYS_DIR/immich.rsa.pub"
+            require_output_file "$ARTIFACT_DIR/$asset.pub"
+            # Trust the key derived from the secret, not merely the key shipped
+            # beside the package. The private key has already been deleted.
+            if ! cmp -s "$VERIFICATION_KEYS_DIR/immich.rsa.pub" "$ARTIFACT_DIR/$asset.pub"; then
+              echo '::error::Published public key does not match APK_SIGNING_KEY.' >&2
+              exit 1
+            fi
+            if ! apk verify --keys-dir "$VERIFICATION_KEYS_DIR" "$ARTIFACT_DIR/$asset"; then
               echo "::error::APK signature verification failed for $asset." >&2
               exit 1
             fi
             output_files+=("$ARTIFACT_DIR/$asset.pub")
+          else
+            # Unsigned artifact-only builds still need an integrity check.
+            if ! apk verify --allow-untrusted "$ARTIFACT_DIR/$asset"; then
+              echo "::error::Unsigned APK integrity verification failed for $asset." >&2
+              exit 1
+            fi
           fi
 
           # Runtime library files belong to the main APK. Publish only the
@@ -256,25 +295,30 @@ jobs:
             printf 'IMMICH_APK_FILES\n'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Remove temporary signing key
+      - name: Remove temporary signing and verification keys
         if: always()
         env:
           SIGNING_DIR: ${{ steps.build.outputs.signing_dir }}
+          VERIFICATION_KEYS_DIR: ${{ steps.build.outputs.verification_keys_dir }}
         run: |
-          if [[ "$SIGNING_DIR" == /tmp/immich-apk-signing.* ]]; then
+          set -Eeuo pipefail
+          if [[ "$SIGNING_DIR" =~ ^/tmp/immich-apk-signing\.[A-Za-z0-9]+$ ]]; then
             rm -rf -- "$SIGNING_DIR"
+          fi
+          if [[ "$VERIFICATION_KEYS_DIR" =~ ^/tmp/immich-apk-verify\.[A-Za-z0-9]+$ ]]; then
+            rm -rf -- "$VERIFICATION_KEYS_DIR"
           fi
 
       - name: Generate artifact attestation
         uses: actions/attest@v4
         with:
-          subject-path: ${{ steps.build.outputs.files }}
+          subject-path: ${{ steps.build_verify.outputs.files }}
 
       - name: Upload APK to GitHub Release
         if: steps.rev.outputs.release_tag != ''
         uses: softprops/action-gh-release@v3
         with:
-          files: ${{ steps.build.outputs.files }}
+          files: ${{ steps.build_verify.outputs.files }}
           fail_on_unmatched_files: true
           tag_name: ${{ steps.rev.outputs.release_tag }}
         env:
@@ -284,7 +328,7 @@ jobs:
         if: steps.rev.outputs.release_tag == ''
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.build.outputs.artifact_name }}
-          path: ${{ steps.build.outputs.files }}
+          name: ${{ steps.build_verify.outputs.artifact_name }}
+          path: ${{ steps.build_verify.outputs.files }}
           if-no-files-found: error
           retention-days: 30
