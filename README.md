@@ -45,6 +45,7 @@ apk add /tmp/immich-alpine-latest.apk
 
 ## Advanced Installation (and Upgrading)
 I recommend doing this advanced installation so future upgrades can be done using `apk upgrade`
+
 **wget**
 ```bash
 # Add and trust this repository's APK public key
