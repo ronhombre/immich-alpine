@@ -85,6 +85,33 @@ of this package method. You should be able to validate implicitly that the APK g
 built using GitHub Actions and is not implanted with malware. You are also free to not install the public key as long as
 you understand the risks.
 
+## Configuration (After Install)
+Edit your `/var/lib/immich/env` with the values of your PostgresQL server and Redis server (or compatible alternatives).
+
+Click the `I` key on your keyboard to start editing.
+```bash
+vi /var/lib/immich/env
+```
+Once done, click `Esc` on your keyboard and type `:wq!` to write(save) and quit.
+
+You can then start the immich service which also starts the immich-ml service.
+```bash
+service immich start
+```
+
+If it crashes or doesn't start, check `/var/log/immich/immich.err` and `/var/log/immich/immich.log`.
+
+By default, Immich should be accessible through `http://[YOUR_SERVER_IP_HERE]:2283` but if you want to use `nginx`
+you should point the proxy_pass to that address. Consult the official
+[Immich docs](https://docs.immich.app/administration/reverse-proxy/) for more information.
+
+> [!NOTE]
+> Don't forget to open the Firewall! A helpful test to verify it is properly serving is
+> `curl --silent --show-error --fail --max-time 3 http://127.0.0.1:2283/api/server/ping` and you should get
+> `{"res":"pong"}`.
+
+It is also possible to mount a different disk to `/var/lib/immich/upload`. That's currently what I do.
+
 ## Example (Working)
 ![proxmox-sample-ct.png](proxmox-sample-ct.png)![proxmox-sample-ct-idle.png](proxmox-sample-ct-idle.png)
 
