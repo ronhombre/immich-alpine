@@ -545,6 +545,47 @@ stop_services() {
     done
     return 0
 }
+# The legacy tarball layout could contain a real top-level i18n directory.
+# APK owns this path as a symlink; move the old directory before APK commits
+# files. Keep it separately from prunable application snapshots, even on retry.
+migrate_legacy_i18n() {
+    python3 - "$base" "$backups" <<'I18N_MIGRATION_PY'
+from pathlib import Path
+import os, stat, sys, tempfile
+
+base, backups = map(Path, sys.argv[1:])
+legacy = base / 'i18n'
+try:
+    mode = legacy.lstat().st_mode
+except FileNotFoundError:
+    sys.exit(0)
+if stat.S_ISLNK(mode):
+    # Never follow an existing link; APK will install the packaged link itself.
+    sys.exit(0)
+if not stat.S_ISDIR(mode):
+    raise SystemExit('Immich i18n migration: expected a directory or symlink at ' + str(legacy))
+
+# A same-filesystem rename preserves all contents, ownership and internal
+# symlinks without copying or deleting them. A mount point / cross-device move
+# must fail rather than falling back to recursive copying and removal.
+saved = Path(tempfile.mkdtemp(prefix='i18n-migration-', dir=backups)) / 'i18n'
+try:
+    os.rename(legacy, saved)
+except OSError as error:
+    try:
+        saved.parent.rmdir()  # Only our newly-created, empty backup directory.
+    except OSError:
+        pass
+    raise SystemExit('Immich i18n migration: could not preserve ' + str(legacy) +
+                     ': ' + str(error) + '. No recursive removal was attempted.') from error
+print('Preserved legacy i18n directory: ' + str(saved))
+I18N_MIGRATION_PY
+}
+verify_installed_i18n() {
+    [ -L "$base/i18n" ] && [ "$(readlink "$base/i18n")" = app/i18n ] && \
+        [ -d "$base/app/i18n" ] && [ ! -L "$base/app/i18n" ] || \
+        fail 'Installed i18n must be the package symlink app/i18n with a real application translation directory; refusing to start services.'
+}
 pre_install_or_upgrade() {
     prepare_state
     # A failed pre hook must never leave an old approval for the post hook.
@@ -595,6 +636,9 @@ pre_install_or_upgrade() {
     elif [ -n "$old_version" ]; then
         fail 'Installed application is missing and no completed upgrade snapshot is recorded.'
     fi
+    # Existing services are stopped and any pending application snapshot was
+    # validated above. Retries also pass here, including recovery from r1.
+    migrate_legacy_i18n
     run_bundled_runtime_hooks pre
     if [ -n "$backup" ]; then
         printf '%s\tto=%s\tstarted\n' "$(now)" "$target_version" >> "$backup/attempts.log"
@@ -695,6 +739,7 @@ post_install_or_upgrade() {
         fresh) [ ! -e "$pending" ] || fail 'Fresh installation has unexpected pending upgrade state.' ;;
         *) fail 'Invalid prepared installation phase.' ;;
     esac
+    verify_installed_i18n
     setup_runtime
     run_bundled_runtime_hooks post
     if [ "$phase" = fresh ]; then
